@@ -57,6 +57,13 @@ State of the milanf work (desk phase, no hardware yet):
   Unfinished, in order: (1) fix the 0082 hunk counts at line 56 and
   re-dispatch; (2) the phone plug-in session (recon → DTB) still gates
   every hardware value. `../root-tweaks/` remains local, unpublished.
+- **Public face (2026-10-21):** on Giulia's request the repo description
+  was set to "iOS on Android hardware: XNU + iPhone userland ported to
+  the Moto G Stylus 5G 2022 (milanf, Snapdragon 695 / SM6375). Fork of
+  dipa-studio/ios-sweet." with topics ios, xnu, kernel-port, qualcomm,
+  sm6375, motorola; README.md gained a milanf fork header (purpose,
+  honest status incl. the 0082 CI failure, BRINGUP/FORK links, Nivelato
+  Labs attribution) prepended above the untouched upstream README.
 - House rules from AGENTS.md apply unchanged; no device dumps, serials, or
   Apple artifacts are in either repo.
 

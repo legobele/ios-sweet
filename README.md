@@ -1,3 +1,18 @@
+# ios-sweet: milanf fork
+
+This fork ports the [dipa-studio/ios-sweet](https://github.com/dipa-studio/ios-sweet) stack (Apple XNU kernel plus iPhone userland) from `sweet` (Redmi Note 10 Pro, Qualcomm SM7150 / Snapdragon 732G) to `milanf`, the Moto G Stylus 5G 2022 (Qualcomm SM6375 / Snapdragon 695).
+
+## Status (2026-10-21)
+
+- [BRINGUP.md](BRINGUP.md) is the runbook for SPEC steps 1 to 4: stock partition dumps, the ABL splash framebuffer probe, kernel bring-up to a framebuffer console, and root image boot. [FORK.md](FORK.md) records fork decisions and deviations from upstream.
+- The MILANF machine config exists as patch `xnu/patches/0082-milanf-machine-config.patch` and currently fails to apply in CI (corrupt hunk at line 56 of the patch); repair is queued. First CI run: [39691962059](https://github.com/legobele/ios-sweet/actions/runs/39691962059).
+- 12 of 23 hardware values (memory map, framebuffer parameters, UFS base, and others) are UNKNOWN pending the target unit's stock DTB; device recon has not run yet. The build tooling refuses to emit a bootable image while placeholders are unresolved.
+- Nothing has booted on milanf hardware yet. Everything below this header is the upstream README and describes `sweet`.
+
+A Nivelato Labs project. Fork of dipa-studio/ios-sweet; all upstream credit belongs to its authors.
+
+---
+
 # ios-sweet
 
 **Apple's iOS 16 running on a Redmi Note 10 Pro.**
