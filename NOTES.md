@@ -64,6 +64,18 @@ State of the milanf work (desk phase, no hardware yet):
   sm6375, motorola; README.md gained a milanf fork header (purpose,
   honest status incl. the 0082 CI failure, BRINGUP/FORK links, Nivelato
   Labs attribution) prepended above the untouched upstream README.
+- **README front rewrite (2026-10-21, later):** on Giulia's verdict that
+  the dry header showed none of the fork's features or humor, the fork
+  front section of README.md was rewritten in her register: the Note7
+  enrolled identity (SPEC §4) leads, followed by the root-tweaks feature
+  list (gay gate, ledger, consistency court outcomes, allegiance math,
+  battery roulette incl. the 12,000-spin fairness numbers and the
+  undefined "your mom", fake USPS tracker, tint endpoints, p(doom),
+  compass, Foxconn pane) with figures quoted only from
+  `../root-tweaks/TEST-RESULTS.txt`, then an honesty status box (nothing
+  booted; 0082 still corrupt at line 56 per run 39691962059; 12/23
+  values UNKNOWN pending DTB; mkadt placeholder refusal). Upstream
+  README remains intact below the divider.
 - House rules from AGENTS.md apply unchanged; no device dumps, serials, or
   Apple artifacts are in either repo.
 
