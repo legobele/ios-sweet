@@ -23,6 +23,24 @@ State of the milanf work (desk phase, no hardware yet):
 - Enrolled model name (SPEC §4): "Samsung Galaxy Note7" — also the unit's
   current Android enrolled name (Giulia, 2026-10-21), so the identity is
   continuous across both OSes.
+- **Boot-phase desk prep (2026-10-21, later):** `BRINGUP.md` (new) expands
+  SPEC §14 steps 1–4 into an exact runbook incl. the §1.1 probe as an
+  executable plan and both build-host routes. MILANF machine config
+  authored as patch `xnu/patches/0082-milanf-machine-config.patch`
+  (sibling of 0004; shares the sleh/pe_fiq Group-1 paths; desk-authored
+  against 0004's post-image, NOT yet applied or built). Siblings:
+  `tools/mkadt-milanf.py` (refuses to emit an ADT while required values
+  are UNKNOWN), `shim/milanf-config.h` (value ledger), `shim/build-milanf.sh`
+  (gated build). Value state: GIC 0x0f200000/0x0f240000, vtimer INTID 19,
+  CPU clocks/topology CITED from mainline sm6375.dtsi (kernel.org);
+  12 hardware values UNKNOWN pending the unit's DTB (memory banks,
+  FB x5, UFS, IMEM, PSHOLD) + the stock boot-image header group.
+  `../recon/` (own git repo) is the read-only recon pack that produces
+  that DTB: recon.ps1 + unlock-data.ps1 (Windows/laptop) and
+  decompile.sh (VM side). Next actions, in order: (1) Giulia schedules
+  the phone plug-in session (recon, backups, unlock — unlock wipes);
+  (2) Giulia picks the build host (publish fork for macos-14 CI vs
+  local M1 Max MacBook build). Nothing pushed anywhere.
 - House rules from AGENTS.md apply unchanged; no device dumps, serials, or
   Apple artifacts are in either repo.
 

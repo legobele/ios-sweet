@@ -17,7 +17,7 @@
 
 | Upstream piece | Where it lives here | Transfer status |
 |---|---|---|
-| XNU patch series (xnu-8796, iOS 16 generation) | `xnu/patches/` | Transfers as-is; needs a MILANF machine config added (not yet written — kernel work is SPEC §14 step 3, hardware phase) |
+| XNU patch series (xnu-8796, iOS 16 generation) | `xnu/patches/` | Transfers as-is; MILANF machine config added at desk level 2026-10-21 as patch 0082 (unbuilt; see `BRINGUP.md`) |
 | Root image build | `tools/mkiosroot.sh` | Transfers; milanf root images will be produced by this once a kernel boots |
 | Root-tweaks stage | `tools/sweet-root-tweaks.py` | Transfers; the milanf build-time edits (identity split, Setup panes) are being developed as a separate package in `../root-tweaks/` and will hook into this stage |
 | Payload + boot-arg machinery | `tools/mkpayload.py`, `tools/mkinit.py`, `tools/adt.py`, `tools/mkadt.py` | Transfers |
@@ -29,7 +29,12 @@
 
 - Target SoC: Snapdragon 695 (SM6375) instead of SM7150. ARMv8.2, no PAC —
   the same non-PAC world the kernel patches assume (SPEC §1, §2).
-- A MILANF XNU machine config (to be written; SPEC §14 step 3).
+- A MILANF XNU machine config: **written at desk level 2026-10-21**
+  (`xnu/patches/0082-milanf-machine-config.patch`, `tools/mkadt-milanf.py`,
+  `shim/milanf-config.h`, `shim/build-milanf.sh`; runbook in `BRINGUP.md`).
+  Hardware values are mainline-sm6375.dtsi-cited or explicit UNKNOWN
+  placeholders gated against use; the unit's DTB (via `../recon/`)
+  resolves the rest. Not yet applied or built anywhere.
 - Motorola boot chain facts: A/B slots, official bootloader unlock, Moto ABL
   splash-framebuffer behavior (UNKNOWN, SPEC §1.1 / §13.1).
 - Giulia's unit specifics: warranty-replacement unit, panel type UNKNOWN
@@ -54,9 +59,9 @@
 
 | # | Step | Status in this repo state |
 |---|---|---|
-| 1 | Step-0 backups and dumps (boot, dtbo, vbmeta, persist, modem partitions; stock DTB) | NOT satisfied — hardware step, device in hand required. Resolves unknowns 2, 3, 4, 6 |
-| 2 | §1.1 probe (splash framebuffer + fastboot boot) | NOT satisfied — hardware step. Resolves unknown 1 |
-| 3 | Shim + MILANF machine config + kernel boot to framebuffer console and persistent log | NOT satisfied — shim source present from upstream; MILANF config not yet written |
+| 1 | Step-0 backups and dumps (boot, dtbo, vbmeta, persist, modem partitions; stock DTB) | NOT satisfied — hardware step, device in hand required. **Recon pack prepared 2026-10-21** (`../recon/`: read-only adb/fastboot capture + VM-side decompile) so the session is one plug-in. Resolves unknowns 2, 3, 4, 6 |
+| 2 | §1.1 probe (splash framebuffer + fastboot boot) | NOT satisfied — hardware step. **Executable plan written** (`BRINGUP.md` §3, incl. the persistent log-ring writer as queued probe code). Resolves unknown 1 |
+| 3 | Shim + MILANF machine config + kernel boot to framebuffer console and persistent log | **Desk-prepared 2026-10-21**: MILANF config authored (patch 0082, `tools/mkadt-milanf.py`, `shim/milanf-config.h`, `shim/build-milanf.sh`); runbook in `BRINGUP.md` §4. Hardware boot still NOT satisfied — needs step 1's DTB values + a build host (GitHub CI vs MacBook, Giulia's call) |
 | 4 | UFS driver, root image boot, launchd, SpringBoard (tethered) | NOT satisfied |
 | 5 | Touch, PMIC keys, battery reporting; A78 cores lit | NOT satisfied |
 | 6 | Full install (SPEC §3) once SpringBoard is reliable | NOT satisfied |
