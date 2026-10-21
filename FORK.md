@@ -1,5 +1,27 @@
 # FORK.md — ios-sweet → ios-milanf
 
+## Publication
+
+- Public repo: https://github.com/legobele/ios-sweet — a GitHub fork of
+  dipa-studio/ios-sweet (fork relationship preserved; upstream history
+  intact). Published 2026-10-21. Upstream ships no LICENSE file, so this
+  fork relies on the GitHub fork mechanism and keeps upstream attribution
+  via the fork link and the untouched upstream history.
+- GitHub Actions: ENABLED (verified via API: enabled, allowed_actions=all;
+  workflow `xnu` active).
+- First CI run (2026-10-21, `workflow_dispatch` on branch `milanf`,
+  machine_config=MILANF):
+  https://github.com/legobele/ios-sweet/actions/runs/39691962059
+  Outcome: FAILURE in 2m44s, and the failure is the informative kind.
+  Patch `0082-milanf-machine-config.patch` was skipped by the build as
+  malformed — `error: corrupt patch at line 56` (a hunk in the MakeInc.def
+  section) — so the MILANF machine config never landed, and the kernel
+  configure stopped legibly with
+  `MakeInc.kernel:22: *** Unsupported CURRENT_MACHINE_CONFIG MILANF. Stop.`
+  Everything upstream of that point worked end to end: checkout, dxb fetch,
+  deps (Xcode 15.0 on macos-14), and the full upstream patch series.
+  Next fix: repair the 0082 hunk counts at line 56 and re-dispatch.
+
 ## Upstream
 
 - URL: https://github.com/dipa-studio/ios-sweet

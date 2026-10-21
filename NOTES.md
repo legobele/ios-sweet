@@ -41,6 +41,22 @@ State of the milanf work (desk phase, no hardware yet):
   the phone plug-in session (recon, backups, unlock — unlock wipes);
   (2) Giulia picks the build host (publish fork for macos-14 CI vs
   local M1 Max MacBook build). Nothing pushed anywhere.
+- **Published + first CI (2026-10-21, later still):** Giulia picked the
+  publish route. The fork is public at
+  https://github.com/legobele/ios-sweet (GitHub fork of
+  dipa-studio/ios-sweet; branches `main` = upstream 425b251 and
+  `milanf` pushed, remote refs verified against local HEADs). Actions
+  enabled (API-verified). First CI run, `workflow_dispatch` on `milanf`
+  with machine_config=MILANF:
+  https://github.com/legobele/ios-sweet/actions/runs/39691962059 —
+  FAILURE in 2m44s, at the expected place: patch 0082 was skipped as
+  malformed (`error: corrupt patch at line 56`, the MakeInc.def hunk),
+  so MILANF never landed and configure stopped with
+  `MakeInc.kernel:22: *** Unsupported CURRENT_MACHINE_CONFIG MILANF`.
+  Checkout, dxb fetch, deps and the upstream patch series all worked.
+  Unfinished, in order: (1) fix the 0082 hunk counts at line 56 and
+  re-dispatch; (2) the phone plug-in session (recon → DTB) still gates
+  every hardware value. `../root-tweaks/` remains local, unpublished.
 - House rules from AGENTS.md apply unchanged; no device dumps, serials, or
   Apple artifacts are in either repo.
 
