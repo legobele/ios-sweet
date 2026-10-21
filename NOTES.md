@@ -1,5 +1,31 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## MILANF FORK NOTE (2026-10-21, branch `milanf` — read this if you are continuing the milanf port)
+
+This repo was forked on branch `milanf` at upstream commit
+`425b25102b6a9ee4b68fb2b9ca5d6a086b8a4116` for the ios-milanf port (iOS 16.7.16
+userland on the Moto G Stylus 5G (2022) / SM6375; design spec: `../SPEC.md`,
+fork notes: `FORK.md`). Everything below this note is UPSTREAM (sweet/SM7150)
+history and workflow — still the reference for the kernel/shim machinery, but
+its device state, images, and next steps are the sweet unit's, not milanf's.
+
+State of the milanf work (desk phase, no hardware yet):
+- `../root-tweaks/` (sibling package, own git repo): identity split (SPEC §4)
+  scripts + verifier, prefs core, portable-C logic core for all §12 Setup
+  state machines (87 host checks passing), §12 pane skeletons with verbatim
+  spec copy, gender tint Logos hook (real math, skeleton hook points), and
+  the Procursus (strap 1600) + Sileo 2.5.1 bootstrap layer — official
+  sources, pinned SHA-256s, host-verified (`BOOTSTRAP-VERIFY.txt` there).
+- Nothing is integrated into `tools/sweet-root-tweaks.py` yet; that happens
+  at SPEC §14 step 7, once a milanf root image boots (step 4). The §1.1 probe
+  (Moto ABL splash framebuffer + fastboot boot) remains the first hardware
+  action and gates everything else.
+- Enrolled model name (SPEC §4): "Samsung Galaxy Note7" — also the unit's
+  current Android enrolled name (Giulia, 2026-10-21), so the identity is
+  continuous across both OSes.
+- House rules from AGENTS.md apply unchanged; no device dumps, serials, or
+  Apple artifacts are in either repo.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
