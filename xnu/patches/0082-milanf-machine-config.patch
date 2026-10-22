@@ -74,17 +74,12 @@ diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -1856,18 +1856,24 @@ sleh_irq(arm_saved_state_t *state)
+@@ -1856,10 +1856,11 @@ sleh_irq(arm_saved_state_t *state)
  #endif
  
  
 -#if defined(SWEET)
 +#if defined(SWEET) || defined(MILANF)
-+#if defined(MILANF)
-+#define BOARD_VTIMER_INTID MILANF_VTIMER_INTID
-+#else
-+#define BOARD_VTIMER_INTID SWEET_VTIMER_INTID
-+#endif
  	/*
 -	 * sweet: TrustZone owns GIC Group 0, so the timer and IPIs that other
 -	 * ARM64 targets take as FIQs arrive here as Group 1 IRQs.
@@ -94,16 +89,7 @@ diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
  	 */
  	uint64_t iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
  	uint32_t intid = (uint32_t)(iar & 0xFFFFFF);
- 
- 	if (intid >= 1020 && intid <= 1023) {
- 		return; /* spurious */
- 	}
--	if (intid == SWEET_VTIMER_INTID) {
-+	if (intid == BOARD_VTIMER_INTID) {
- 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_TIMER);
- 		cdp->cpu_decrementer = -1; /* Large */
- 		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
-@@ -1903,7 +1909,7 @@ sleh_irq(arm_saved_state_t *state)
+@@ -1903,7 +1904,7 @@ sleh_irq(arm_saved_state_t *state)
  	    cdp->interrupt_nub,
  	    cdp->interrupt_source);
  #endif
@@ -132,7 +118,7 @@ diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
 diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
 --- a/pexpert/arm/pe_fiq.c
 +++ b/pexpert/arm/pe_fiq.c
-@@ -141,7 +141,14 @@ pe_init_fiq()
+@@ -164,7 +164,14 @@ pe_init_fiq()
  		}
  	}
  
@@ -148,17 +134,16 @@ diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
  	/*
  	 * Real hardware with two security states: Group 0 is TrustZone's and
  	 * non-secure writes to it are ignored. Everything we own is Group 1 NS
-@@ -151,8 +157,8 @@ pe_init_fiq()
- 	gicr_write32(GICR_IGROUPR0, 0xFFFFFFFF);
+@@ -175,7 +182,7 @@ pe_init_fiq()
  	for (unsigned int i = 0; i < 32; i += 4) {
  		gicr_write32(GICR_IPRIORITYR0 + i, 0xA0A0A0A0);
  	}
--	gicr_write32(GICR_ISENABLER0, (1U << SWEET_VTIMER_INTID) | (1U << SWEET_IPI_SGI));
-+	gicr_write32(GICR_ISENABLER0, (1U << BOARD_VTIMER_INTID) | (1U << BOARD_IPI_SGI));
+-	gicr_write32(GICR_ISENABLER0, (1U << sweet_vtimer_intid) | (1U << SWEET_IPI_SGI));
++	gicr_write32(GICR_ISENABLER0, (1U << sweet_vtimer_intid) | (1U << BOARD_IPI_SGI));
  #else
  	// Configure timers and legacy FIQ to be group 0
  	gicr_write32(GICR_IGROUPR0, 0x81FFFFFF);
-@@ -167,12 +173,12 @@ pe_init_fiq()
+@@ -190,12 +197,12 @@ pe_init_fiq()
  	__builtin_arm_wsr64("ICC_SRE_EL1", icc_sre);
  	__builtin_arm_isb(ISB_SY);
  
@@ -173,7 +158,7 @@ diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
  	__builtin_arm_wsr64("ICC_PMR_EL1", 0xFF);
  
  	// Set EOI mode of this processor
-@@ -180,7 +186,7 @@ pe_init_fiq()
+@@ -203,7 +210,7 @@ pe_init_fiq()
  	icc_ctlr &= ~ICC_CTLR_EOIMODE;
  	__builtin_arm_wsr64("ICC_CTLR_EL1", icc_ctlr);
  
@@ -182,7 +167,7 @@ diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
  	// ABL leaves only ARE_NS set; Linux writes ARE_NS | EnableGrp1A | EnableGrp1
  	uint32_t gicd_ctlr = gicd_read32(GICD_CTLR);
  	gicd_ctlr |= GICD_CTLR_ARE_NS | GICD_CTLR_ENABLEGRP1A | GICD_CTLR_ENABLEGRP1;
-@@ -195,7 +201,7 @@ pe_init_fiq()
+@@ -220,7 +227,7 @@ pe_init_fiq()
  	gicd_write32(GICD_CTLR, gicd_ctlr);
  	__builtin_arm_wsr64("ICC_IGRPEN0_EL1", 1);
  	__builtin_arm_isb(ISB_SY);
