@@ -41,7 +41,7 @@ diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
  
  
  #
-@@ -262,8 +263,8 @@ ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),)
+@@ -262,8 +263,9 @@ ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),)
  # Without embdedded device map, use a default arch string
  export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := $(shell echo $(CURRENT_ARCH_CONFIG) | tr A-Z a-z)
  ifneq ($(filter arm64,$(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG)),)
@@ -74,7 +74,7 @@ diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -1856,11 +1856,17 @@ sleh_irq(arm_saved_state_t *state)
+@@ -1856,18 +1856,24 @@ sleh_irq(arm_saved_state_t *state)
  #endif
  
  
@@ -132,7 +132,7 @@ diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
 diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
 --- a/pexpert/arm/pe_fiq.c
 +++ b/pexpert/arm/pe_fiq.c
-@@ -141,7 +141,13 @@ pe_init_fiq()
+@@ -141,7 +141,14 @@ pe_init_fiq()
  		}
  	}
  
@@ -148,7 +148,7 @@ diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
  	/*
  	 * Real hardware with two security states: Group 0 is TrustZone's and
  	 * non-secure writes to it are ignored. Everything we own is Group 1 NS
-@@ -151,7 +157,7 @@ pe_init_fiq()
+@@ -151,8 +157,8 @@ pe_init_fiq()
  	gicr_write32(GICR_IGROUPR0, 0xFFFFFFFF);
  	for (unsigned int i = 0; i < 32; i += 4) {
  		gicr_write32(GICR_IPRIORITYR0 + i, 0xA0A0A0A0);
@@ -194,7 +194,7 @@ diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
 diff --git a/pexpert/pexpert/arm64/Makefile b/pexpert/pexpert/arm64/Makefile
 --- a/pexpert/pexpert/arm64/Makefile
 +++ b/pexpert/pexpert/arm64/Makefile
-@@ -17,7 +17,8 @@ PRIVATE_KERNELFILES = \
+@@ -17,8 +17,9 @@ PRIVATE_KERNELFILES = \
  	boot.h \
  	H13.h \
  	VMAPPLE.h \
@@ -210,7 +210,7 @@ diff --git a/pexpert/pexpert/arm64/MILANF.h b/pexpert/pexpert/arm64/MILANF.h
 new file mode 100644
 --- /dev/null
 +++ b/pexpert/pexpert/arm64/MILANF.h
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,83 @@
 +/*
 + * Board config for the Moto G Stylus 5G (2022) ("milanf", Qualcomm
 + * SM6375 / Snapdragon 695): Kryo 660 = Cortex-A78 + Cortex-A55,
