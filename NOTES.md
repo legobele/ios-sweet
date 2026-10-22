@@ -76,6 +76,22 @@ State of the milanf work (desk phase, no hardware yet):
   booted; 0082 still corrupt at line 56 per run 39691962059; 12/23
   values UNKNOWN pending DTB; mkadt placeholder refusal). Upstream
   README remains intact below the divider.
+- **README Face ID section (2026-10-21, later still):** on Giulia's
+  complaint that the front page said nothing about the Face ID work,
+  README.md gained "The glorious Face ID bullshittery" between the
+  feature list and the status box, sourced entirely from SPEC §8.2,
+  §9, §10 and §11: matcher-daemon backend behind the stock Face ID
+  surface with ship order fingerprint → 2D → structured-light depth;
+  geometry registry; display-as-projector rig (720p120 capture class,
+  photometric stereo liveness, physics limits, Tang et al. 2018 anchor
+  at 98.8%); island un-gate/shrink spec (~60 x 28 pt idle, 2 pt white
+  outline auth presentation); §11 split selector (power-button touch =
+  select + authenticate); holy enrollment (four options incl. the
+  explicit not-implemented ruling on option 3, AREA TO FLASH capture
+  state, chicken progress law with real-photo asset); §10.4 seizure
+  safety as a headline requirement. Docs only; nothing about hardware
+  status changed — nothing has booted yet, and the status box still
+  says so.
 - House rules from AGENTS.md apply unchanged; no device dumps, serials, or
   Apple artifacts are in either repo.
 
