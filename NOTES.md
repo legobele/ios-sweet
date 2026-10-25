@@ -620,6 +620,69 @@ Verified: apply `--check` exit 0 alone and exit 0 in series order behind
 0086-0090, then a real apply to a scratch tree - three files cleanly, CR=0 in
 sources and patch. Link unverified; that needs CI.
 
+### >>> 2026-10-25: 0091, key store and watchdog - the two that panic if absent <<<
+
+Selection criterion for the next two drivers was not "easiest" or "most
+interesting", it was **address-free**, because that is the only property that
+makes a driver safe to enable without a boot test. `SweetKeyStore.cpp` (241
+lines) is a selector switch table plus a hand-rolled DER encoder.
+`SweetWatchdog.cpp` (107 lines) accepts every call and never arms anything.
+Neither touches hardware, so there is no value to read off this unit's DTB and
+nothing to get wrong.
+
+Both are also the two whose **absence is fatal rather than missing**:
+
+- `watchdogd` is a launchd job with `_PanicOnCrash`. It opens
+  `IOServiceMatching("IOWatchdog")` with type 1 and exits when the service is
+  missing - and its exit is a panic. It then looks up the IOService carrying
+  `IOPMUPrimary = 1` to write the boot stage to the PMU and crashes when that
+  is missing too (customer builds ignore `-wdt_no_pmu`). So a board without
+  IOWatchdog does not "lack watchdog support", it panics shortly after
+  userspace starts for a reason unrelated to any actual fault. The driver
+  carries `IOPMUPrimary = 1ULL, 32` and accepts any property write.
+- `keybagd` opens `IOServiceMatching("AppleKeyStore")` with type 0 through
+  libaks and `--init` asks for the system bag (selector 14). It only falls back
+  to loading `systembag.kb` when the answer is `kIOReturnNotFound`, so
+  answering with a handle is the userspace-reboot path and no bag file is
+  needed. The driver reports handle 0 and lock state `0x4` ("unlocked since
+  boot"), which is true for a device with no passcode.
+
+**The personality table is the other half and could not be a separate patch.**
+A class that compiles but has no personality is never instantiated, so both
+daemons would fail exactly as if the file were still an empty translation
+unit. 0091 adds `AppleKeyStore` and `IOWatchdog` entries to the milanf arm that
+0088 created, and rewrites the arm's comment ("the platform expert and nothing
+else, for now") to say what is now in it.
+
+Both files define the **Apple-named classes** (`AppleKeyStore`, `IOWatchdog`,
+plus their UserClient subclasses) rather than Sweet-prefixed ones, because
+those are the names the daemons match on. Checked for collisions across the
+whole tree: neither class name is defined anywhere else, so there is no
+duplicate-symbol risk and no second provider to arbitrate with.
+
+External surface audit (no compiler here, so this is the substitute): every
+call in both files resolved. `proc_selfname` is `kern_proc.c:1411` with no
+board guards; `bzero`/`memcpy`/`strlen` are libkern; the IOExternalMethod
+Arguments fields and IOService methods are ungated IOKit. The one apparent hit
+was `IOLog` "guarded" by `#ifndef __IOKIT_IOLIB_H`, which is its include guard.
+
+**Process note that cost time twice tonight:** `git apply --check` does *not*
+accumulate across multiple patch files - each patch in the argument list is
+tested against the original working tree, so a patch whose context depends on
+an earlier one in the same command always reports "patch does not apply". 0091
+is the first tail patch with that property (it edits the line 0088 adds), so
+the series has to be verified by applying the patches one at a time to a copy.
+Second note: PowerShell variable names are case-insensitive, so a loop using
+`$p` beside a `$P` directory silently appends the previous iteration's value -
+that produced a confusing cascade of "can't open patch .../0086.patch/0087
+.patch" before it was spotted.
+
+Series verification, redone properly one-at-a-time: fresh copy of `ci-art3`,
+apply 0086 through 0091 in order, every one exit 0 and every touched file
+CR=0. Also built a cumulative tree (`ci-art4` = `ci-art3` + 0086-0090) because
+0091 had to be *generated* against post-0088 content; the generator is
+`mk0091.py` and it diffs that tree.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

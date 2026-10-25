@@ -1,0 +1,134 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: the key store and the watchdog, the two that panic if absent
+
+Two of the nine Sweet* drivers, and the reason they are next rather than the
+ones that look more interesting: these are the two whose absence is not a
+missing feature but a missing service that a daemon treats as fatal.
+
+  - **watchdogd** is a launchd job with `_PanicOnCrash`. It opens
+    IOServiceMatching("IOWatchdog") with type 1 and, if the service is not
+    there, exits - and its exit is a panic. It then looks up the IOService
+    carrying `IOPMUPrimary = 1` to write the boot stage to the PMU, and
+    crashes if that is missing too (customer builds ignore -wdt_no_pmu). So a
+    board with no IOWatchdog does not "lack watchdog support", it panics
+    shortly after userspace starts, for a reason that has nothing to do with
+    the actual fault.
+
+  - **keybagd** opens IOServiceMatching("AppleKeyStore") with type 0 from
+    libaks. `keybagd --init` asks for the system bag (selector 14) and only
+    falls back to loading systembag.kb when the answer is kIOReturnNotFound,
+    so answering with a handle is the path a userspace reboot takes and no bag
+    file is needed.
+
+Both are enabled here because both are **address-free**. That is the whole
+selection criterion: every other driver in the set hardcodes three or more
+SoC addresses that do not exist on SM6375 (`sweet_spmi.c` 3, `sweet_rpmh.c` 3,
+`sweet_usb.c` 3, `sweet_touch.c` 3), and `tools/fdt-find.py` confirms the
+blocks are not in this unit's device tree at any base. These two touch no
+hardware at all: SweetKeyStore is a selector switch table and a DER encoder,
+SweetWatchdog accepts every call and never arms anything. There is no value to
+read off the DTB, so there is nothing to get wrong.
+
+What they are, honestly stated:
+
+  - `IOWatchdog` accepts check-in (1), the enable/disable userspace-monitoring
+    pair (3/4 and 0/5) and the two struct selectors (2, 9), zeroes the output,
+    logs each selector the first time it is seen, and never fires. It carries
+    `IOPMUPrimary = 1` and accepts any property write, which is what keeps
+    watchdogd's second lookup from crashing.
+  - `AppleKeyStore` reports the system bag as handle 0 and the lock state as
+    "unlocked since boot", which is the truth for a device with no passcode.
+    Unknown selectors return kIOReturnUnsupported and are logged, so the next
+    selector the system needs shows up on the console instead of failing
+    silently.
+
+Two personalities go into the milanf arm of iokit/KernelConfigTables.cpp,
+which is where the real link between a driver and the system is: a class that
+compiles but has no personality is never instantiated, and both daemons would
+fail exactly as if the driver were still an empty translation unit. That is
+why the table edit is in this patch and not a separate one.
+
+Both files define the Apple-named classes (`AppleKeyStore`,
+`IOWatchdog`) rather than Sweet-prefixed ones, because those are the names the
+daemons match on. Checked for collisions: neither class name is defined
+anywhere else in the tree, so there is no duplicate-symbol risk and no second
+provider to arbitrate with.
+
+IOLog strings keep their SWEET prefix, same as 0088-0090: the pull and
+symbolication tooling greps for them.
+
+Verified without a compiler: apply --check exit 0 alone and in series order
+behind 0086-0090, then a real apply to a scratch tree - three files cleanly,
+CR=0 in sources and patch. Link unverified; CI in the morning.
+
+diff --git a/iokit/Kernel/arm/SweetKeyStore.cpp b/iokit/Kernel/arm/SweetKeyStore.cpp
+index d11fe26..2224e85 100644
+--- a/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -16,7 +16,7 @@
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -238,4 +238,4 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 	    arg0, in_scalars, in_struct, out_scalars, out_struct, ret);
+ 	return ret;
+ }
+-#endif /* SWEET */
++#endif /* SWEET || MILANF */
+diff --git a/iokit/Kernel/arm/SweetWatchdog.cpp b/iokit/Kernel/arm/SweetWatchdog.cpp
+index 8f53742..9f37341 100644
+--- a/iokit/Kernel/arm/SweetWatchdog.cpp
++++ b/iokit/Kernel/arm/SweetWatchdog.cpp
+@@ -16,7 +16,7 @@
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -104,4 +104,4 @@ IOWatchdogUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
+ 	}
+ 	return kIOReturnSuccess;
+ }
+-#endif /* SWEET */
++#endif /* SWEET || MILANF */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 14dbfb6..813de74 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -84,8 +84,9 @@ const char * gIOKernelConfigTables =
+     "   },"
+ #elif defined(ARM64_BOARD_CONFIG_MILANF)
+     /*
+-     * milanf gets the platform expert and nothing else, for now. Every
+-     * other Sweet* driver is still an empty translation unit on this
++     * milanf gets the platform expert plus the two services a device with
++     * no passcode and no reset path needs: AppleKeyStore and IOWatchdog.
++     * Every other Sweet* driver is still an empty translation unit on this
+      * board, and a personality whose class does not exist only earns
+      * an IOKit "can't find class" line. They come back one at a time,
+      * each with its own board values and its own personality here.
+@@ -103,6 +104,16 @@ const char * gIOKernelConfigTables =
+     "     'IONameMatch'     = 'xiaomi,sweet';"
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
++    "   {"
++    "     'IOClass'         = AppleKeyStore;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = AppleKeyStore;"
++    "   },"
++    "   {"
++    "     'IOClass'         = IOWatchdog;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = IOWatchdog;"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"
