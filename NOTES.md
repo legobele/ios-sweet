@@ -1380,7 +1380,130 @@ exactly 2 occurrences before replacing, header comment reworded board-neutrally,
 CR=0 in source and patch, 0086-0100 sequential apply clean (15/15). Inventory:
 13 sites in 12 files -> **11 in 11**, negated class still 0.
 
-### The remaining 11 sites, classified
+### >>> 2026-10-25: 0101, and the first real boot-stopper <<<
+
+Every patch before this one removed a defect that would have been *found*: a
+missing driver matched against a personality, a function built but never called,
+a syscall answering `nosys`. This one was different in a way that matters, and it
+is the reason the inventory was worth doing at all.
+
+`bsd/conf/files:370-375` lists six pthread files, every one `standard`:
+
+```
+bsd/pthread/pthread_shims.c             standard
+bsd/pthread/sweet_pthread_init.c        standard
+bsd/pthread/sweet_pthread_support.c     standard
+bsd/pthread/sweet_pthread_synch.c       standard
+bsd/pthread/pthread_priority.c          standard
+bsd/pthread/pthread_workqueue.c         standard
+```
+
+The last three are the kernel-side skeleton and are already compiled on milanf.
+The middle three are the *other* half - they `#include` the vendored libpthread
+kext - and on milanf their entire body sits inside
+`#if defined(ARM64_BOARD_CONFIG_SWEET)`, so all three are empty translation units.
+
+That is the whole bug, and it is a panic:
+
+```c
+/* bsd/pthread/pthread_shims.c:614 */
+pthread_functions_t pthread_functions = NULL;
+
+/* :623-636 - the only writer */
+pthread_kext_register(pthread_functions_t fns, pthread_callbacks_t *callbacks)
+{ ... pthread_functions = fns; }
+
+/* :314-319 - called unconditionally from bsd_init */
+void
+pthread_init(void)
+{
+        if (!pthread_functions) {
+                panic("pthread kernel extension not loaded (function table is NULL).");
+        }
+        pthread_functions->pthread_init();
+}
+```
+
+`bsd/kern/bsd_init.c:743` calls `pthread_init()` with no guard at all. The only
+thing that ever calls `pthread_kext_register` is the provider, entered through
+`sweet_pthread_start(NULL, NULL)` at `sweet_pthread_init.c:19`, from a startup
+hook on line 25:
+
+```c
+STARTUP(EARLY_BOOT, STARTUP_RANK_SECOND, sweet_pthread_register);
+```
+
+So on milanf the table is never filled, `bsd_init` reaches line 743, and the
+kernel panics - before `pshm_cache_init`, before the network stack, long before
+userspace. **The build log says nothing**, because nothing is missing to link:
+the symbol exists, it is a NULL that the same file defines and the same file
+checks. Any worklist built from undefined references would have declared this
+file clean.
+
+It is also not merely one bad line. `pthread_workqueue.c` - ungated, compiled on
+milanf today - dereferences the table at `:1051`, `:1062`, `:1159`, `:3380`,
+`:3618` and `:4658`, against slots the provider fills
+(`workq_create_threadstack`, `workq_destroy_threadstack`, `workq_setup_thread`,
+`workq_markfree_threadstack`, `workq_handle_stack_events`,
+`kevent_workq_internal`). Deleting the panic without supplying the table would
+move the fault a few thousand instructions later and turn a named panic into an
+unnamed one.
+
+### Why the header is the fourth file
+
+`sweet_pthread_init.c:7` asserts the provider's layout against the kernel's
+opaque storage:
+
+```c
+_Static_assert(sizeof(struct ksyn_waitq_element) == 56,
+    "update SWEET ksyn storage in sys/pthread_internal.h");
+```
+
+and `bsd/sys/pthread_internal.h:35-46` supplies 56 only for sweet, 48 otherwise.
+Widen the trio alone and the assert fires at compile time; widen the header alone
+and every uthread grows 8 bytes for no consumer. Four files, one unit.
+
+The box is only ever used by address - `bsd/sys/user.h:163` embeds it as
+`uus_kwe`, and `pthread_shims.c:292` recovers the uthread from it with
+`__container_of(kwe, struct uthread, uu_save.uus_kwe)` - so the address is the
+same either way. The extra 8 bytes are room for the provider's trailing `kwe_uth`
+pointer, past the end of the 48-byte box. `struct user` is kernel-private, so the
+size change is not an ABI change.
+
+### The staging order was already right
+
+`0019-stage-libpthread.sh` fetches libpthread-514.100.2 at pinned commit
+`a6c70ca0e544347a0377babf748f831577ec24f9` into `bsd/pthread/sweet_libpthread/`,
+and its board selection already reads
+
+```sh
+case "${MACHINE_CONFIG:-}" in
+SWEET|MILANF) ;;
+*) exit 0 ;;
+esac
+```
+
+from commit `8a9ed6b` ("stage the port's sources for MILANF too"), which was done
+deliberately ahead of this gate. That order is load-bearing: line 4's
+`#include "sweet_libpthread/kern/kern_init.c"` resolves only because the staging
+script copies the directory for MILANF. Had the gate gone first, the morning
+build would have died on a missing include - the same failure one layer earlier,
+and much easier to mis-file as a vendored-source problem and set aside.
+
+### The verification limit, stated rather than papered over
+
+The provider source is not in the build artifacts by design ("no downloaded
+sources in git" in the staging script's own comment), so `sweet_libpthread/` is
+absent from `ci-art3` and `ci-tail` and **this patch cannot be compile-checked
+off-device.** The `_Static_assert` is precisely what a local compile would have
+confirmed, and it is why the header ships in this patch instead of a follow-up.
+
+Checked: four gates + three `#endif` comments + one tab-indented header gate, one
+occurrence each (7 rewritten lines), CR=0 in all four sources and the patch,
+0086-0101 applying clean in order (16/16). Inventory: 11 sites in 11 files ->
+**8 in 8**, negated class still 0. Link and boot unverified; CI in the morning.
+
+### The remaining 8 sites, classified
 
 Not all of them are the same kind of work, and only one of them must not be
 touched at all:
@@ -1388,7 +1511,6 @@ touched at all:
 | site(s) | kind | note |
 | --- | --- | --- |
 | `bsd/net/rtsock.c`, `bsd/netinet/in.c` | mechanical | |
-| `bsd/pthread/*` x3 | mechanical, as a unit | `bsd/sys/pthread_internal.h` declares what the three .c files define - it did not appear in this inventory pass, so re-check it when the trio is widened |
 | `bsd/vfs/kpi_vfs.c` | mechanical | |
 | `pexpert/arm/pe_fiq.c:109` | mechanical, free | `virtual-timer-intid` is absent from the unit's DT and both boards default to 19 |
 | `iokit/Kernel/arm/SweetBattery.cpp` | **blocked** | needs `bsd/dev/sweet_spmi.c` widened first (it calls `sweet_spmi_init`/`sweet_spmi_read`), and SPMI is real per-board work: milanf's arbiter is at 0x1c40000 with PM6125 + PMR735A + PMK8350 |

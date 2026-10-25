@@ -1,0 +1,216 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: the pthread provider, without which bsd_init panics
+
+This is the first patch in the series that is a boot-stopper rather than a latent
+defect, and the reason it was not obvious is that it does not produce a link
+error. It produces a reboot.
+
+`bsd/conf/files:370-375` lists six pthread files, all `standard`, i.e. compiled
+for every board with no gate:
+
+```
+bsd/pthread/pthread_shims.c             standard
+bsd/pthread/sweet_pthread_init.c        standard
+bsd/pthread/sweet_pthread_support.c     standard
+bsd/pthread/sweet_pthread_synch.c       standard
+bsd/pthread/pthread_priority.c          standard
+bsd/pthread/pthread_workqueue.c         standard
+```
+
+The last three are the kernel-side skeleton and they are already compiled on
+milanf. The middle three are the *other* half - the shim that compiles in the
+vendored libpthread kext - and on milanf their entire body sits inside
+`#if defined(ARM64_BOARD_CONFIG_SWEET)`, so all three are empty translation units.
+
+## The chain
+
+`bsd/pthread/pthread_shims.c:614`:
+
+```c
+pthread_functions_t pthread_functions = NULL;
+```
+
+There is exactly one writer of that variable, `pthread_kext_register()` at
+`:623-636`, and its only caller is the provider itself - the vendored
+libpthread-514.100.2 `kern/kern_init.c`, compiled into `sweet_pthread_init.c` by
+the `#include` on its line 4. The provider is entered through
+`sweet_pthread_start(NULL, NULL)` on line 19 of that file, which runs from a
+startup hook registered on line 25:
+
+```c
+STARTUP(EARLY_BOOT, STARTUP_RANK_SECOND, sweet_pthread_register);
+```
+
+So the table is filled during early boot on sweet, and on milanf nothing is
+registered, nothing runs, and it stays NULL.
+
+Then `bsd/kern/bsd_init.c:743`, with no guard of any kind around it:
+
+```c
+        pthread_init();
+```
+
+and `pthread_shims.c:314-319`:
+
+```c
+void
+pthread_init(void)
+{
+        if (!pthread_functions) {
+                panic("pthread kernel extension not loaded (function table is NULL).");
+        }
+```
+
+A milanf kernel therefore links clean, boots, reaches `bsd_init`, and panics -
+before `pshm_cache_init`, before the network stack, long before userspace. The
+build log is silent because there is nothing missing to link: the symbol exists.
+It is a NULL that the same file defines and the same file checks.
+
+This also explains the shape of the worklist: an inventory that only looks for
+*undefined* references would have swept past all four of these files, because
+none of them is missing. What is missing is a registration that happens on one
+board and not the other.
+
+## Why the header is in the same patch
+
+`sweet_pthread_init.c:7` asserts the provider's layout against the kernel's
+opaque storage:
+
+```c
+_Static_assert(sizeof(struct ksyn_waitq_element) == 56,
+    "update SWEET ksyn storage in sys/pthread_internal.h");
+```
+
+and `bsd/sys/pthread_internal.h:35-46` supplies 56 only for sweet, 48 otherwise:
+
+```c
+struct ksyn_waitq_element {
+#if __LP64__
+        #if defined(ARM64_BOARD_CONFIG_SWEET)
+        /* libpthread-514.100.2 includes the trailing kwe_uth pointer. */
+        char opaque[56];
+#else
+        char opaque[48];
+#endif
+```
+
+So the trio cannot move alone: widen the three TUs and the assert fires at
+compile time. And the header cannot move alone either - it would grow an opaque
+box in every uthread by 8 bytes for no consumer.
+
+The box is only ever held by address. `bsd/sys/user.h:163` embeds it as
+`struct ksyn_waitq_element uus_kwe` in the saved user state, and
+`pthread_shims.c:292` recovers the enclosing uthread with
+
+```c
+th = get_machthread(__container_of(kwe, struct uthread, uu_save.uus_kwe));
+```
+
+so the address is identical either way; what the extra 8 bytes buy is the room
+the provider writes into past the 48-byte end, where its trailing `kwe_uth`
+pointer lives. `struct user` is kernel-private, so the size change is not an ABI
+change.
+
+Four files, one unit, one reason each.
+
+## Staging was already widened, in the right order
+
+`xnu/patches/0019-stage-libpthread.sh` fetches libpthread-514.100.2 at the pinned
+commit `a6c70ca0e544347a0377babf748f831577ec24f9` and copies `kern/`, `private/`
+and `include/` into `bsd/pthread/sweet_libpthread/`. Its board selection is
+
+```sh
+case "${MACHINE_CONFIG:-}" in
+SWEET|MILANF) ;;
+*) exit 0 ;;
+esac
+```
+
+which commit `8a9ed6b` ("stage the port's sources for MILANF too") had already
+done, deliberately ahead of this gate. The order matters: the `#include
+"sweet_libpthread/kern/kern_init.c"` on line 4 resolves only because the staging
+script copies the directory for MILANF. Had the gate been widened first, the
+morning build would have died on a missing include instead of the panic this
+patch removes - same failure, one layer earlier and much easier to file under
+"vendored source problem" and set aside.
+
+## What is deliberately not here
+
+`pthread_shims.c`, `pthread_priority.c` and `pthread_workqueue.c` are ungated and
+already compiled on milanf. They are also the reason the panic is not merely one
+bad line: `pthread_workqueue.c` dereferences `pthread_functions` at `:1051`,
+`:1062`, `:1159`, `:3380`, `:3618` and `:4658`, against table slots the provider
+fills (`workq_create_threadstack`, `workq_destroy_threadstack`,
+`workq_setup_thread`, `workq_markfree_threadstack`, `workq_handle_stack_events`,
+`kevent_workq_internal`). The NULL table gates the whole workqueue path, so
+removing the panic without supplying the table would just move the fault a few
+thousand instructions later, from a named panic to an unnamable one.
+
+## Verification, and its limit
+
+The provider source is not in the build artifacts on purpose - the staging script
+says so in a comment, "no downloaded sources in git" - so `sweet_libpthread/` is
+absent from `ci-art3` and from `ci-tail`, and this patch cannot be compile-checked
+off-device. That is a real limit and it is stated rather than papered over: the
+`_Static_assert` above is the exact thing a local compile would have confirmed,
+and it is the reason the header is in the patch instead of a follow-up.
+
+What was verified: the three `.c` gates and their three `#endif` comments, the
+tab-indented header gate, one occurrence each (13 replacements across 4 files),
+CR=0 in all four sources and the patch, and 0086-0101 applying clean in order.
+Link and boot unverified; CI and the device are the morning's business.
+
+diff --git a/bsd/pthread/sweet_pthread_init.c b/bsd/pthread/sweet_pthread_init.c
+index 5a82439..f4c9d7e 100644
+--- a/bsd/pthread/sweet_pthread_init.c
++++ b/bsd/pthread/sweet_pthread_init.c
+@@ -1,5 +1,5 @@
+ /* Built-in provider: Apple libpthread-514.100.2, paired with xnu-8796.141.3. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_pthread_compat.h"
+ #include "sweet_libpthread/kern/kern_init.c"
+ 
+@@ -23,4 +23,4 @@ sweet_pthread_register(void)
+     kprintf("SWEET pthread: libpthread-514.100.2 registered\n");
+ }
+ STARTUP(EARLY_BOOT, STARTUP_RANK_SECOND, sweet_pthread_register);
+-#endif /* ARM64_BOARD_CONFIG_SWEET */
++#endif /* ARM64_BOARD_CONFIG_SWEET || ARM64_BOARD_CONFIG_MILANF */
+diff --git a/bsd/pthread/sweet_pthread_support.c b/bsd/pthread/sweet_pthread_support.c
+index beae777..8d64371 100644
+--- a/bsd/pthread/sweet_pthread_support.c
++++ b/bsd/pthread/sweet_pthread_support.c
+@@ -1,5 +1,5 @@
+ /* Built-in provider: Apple libpthread-514.100.2, paired with xnu-8796.141.3. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_pthread_compat.h"
+ #include "sweet_libpthread/kern/kern_support.c"
+-#endif /* ARM64_BOARD_CONFIG_SWEET */
++#endif /* ARM64_BOARD_CONFIG_SWEET || ARM64_BOARD_CONFIG_MILANF */
+diff --git a/bsd/pthread/sweet_pthread_synch.c b/bsd/pthread/sweet_pthread_synch.c
+index 08baa1b..9f2d572 100644
+--- a/bsd/pthread/sweet_pthread_synch.c
++++ b/bsd/pthread/sweet_pthread_synch.c
+@@ -1,5 +1,5 @@
+ /* Built-in provider: Apple libpthread-514.100.2, paired with xnu-8796.141.3. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_pthread_compat.h"
+ #include "sweet_libpthread/kern/kern_synch.c"
+-#endif /* ARM64_BOARD_CONFIG_SWEET */
++#endif /* ARM64_BOARD_CONFIG_SWEET || ARM64_BOARD_CONFIG_MILANF */
+diff --git a/bsd/sys/pthread_internal.h b/bsd/sys/pthread_internal.h
+index 135405e..0cd3280 100644
+--- a/bsd/sys/pthread_internal.h
++++ b/bsd/sys/pthread_internal.h
+@@ -34,7 +34,7 @@
+ 
+ struct ksyn_waitq_element {
+ #if __LP64__
+-	#if defined(ARM64_BOARD_CONFIG_SWEET)
++	#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 	/* libpthread-514.100.2 includes the trailing kwe_uth pointer. */
+ 	char opaque[56];
+ #else
