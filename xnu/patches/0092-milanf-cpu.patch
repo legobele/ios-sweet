@@ -1,0 +1,202 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: the CPU driver, with the topology read off the unit's own DTB
+
+This is the first driver in the set whose SoC-specific surface turns out to be
+**zero**. The only constant in it is the PSCI function ID 0xC4000003 for
+CPU_ON, and that is SMCCC - a numbered function in a firmware calling
+convention, not a memory-mapped address - so it is the same number on any
+PSCI 0.2+ implementation, on any SoC. Everything else is either architected
+(Aff1/Aff0 in MPIDR, ICC_SGI1R_EL1, the GIC redistributor SGI enable) or read
+from the topology that ml_topology builds out of the ADT.
+
+So the interesting question was not "does this hardware exist" but "does this
+board's topology look like the one the validation code assumes". It was read
+off the unit's own DTB rather than assumed, with a new tools/fdt-cpus.py:
+
+    /cpus/cpu@0      reg=0x0 0x0     enable-method=psci
+    /cpus/cpu@100    reg=0x0 0x100   ...
+    /cpus/cpu@200    reg=0x0 0x200
+    /cpus/cpu@300    reg=0x0 0x300
+    /cpus/cpu@400    reg=0x0 0x400
+    /cpus/cpu@500    reg=0x0 0x500
+    /cpus/cpu@600    reg=0x0 0x600
+    /cpus/cpu@700    reg=0x0 0x700
+
+Eight cores, Aff1 = 0x0-0x7, Aff0 = 0 on every one, enable-method psci. That
+is the same shape the sweet code validates (`phys_id > 0x700 || (phys_id &
+0xff) != 0` -> panic) so the check passes unchanged, and it has to: the
+cpu-map in the same tree splits them cluster0/core0..core5 and
+cluster1/core0..core1, which is the little/big split ml_topology will derive.
+The `num_cpus > SWEET_SMP_MAX_CPUS` bound is 8 on both boards.
+
+The match string, though, is different and is the one real edit: the tree's
+cpu nodes say `compatible = "qcom,kryo"`, but that is not what IOKit matches
+against - it matches the ADT, and tools/mkadt-milanf.py publishes
+`qcom,kryo660` on those nodes (CPU_COMPATIBLE, line 116). So the personality
+carries qcom,kryo660 while sweet's carries qcom,kryo470. A driver that
+compiled and matched nothing would look exactly like a CPU driver that works,
+right up to the point where nothing ever calls start().
+
+Two board macros had to be dealt with rather than duplicated:
+`SWEET_SMP_MAX_CPUS` and `SWEET_IPI_SGI` live in pexpert/arm64/SWEET.h, and
+milanf's header publishes the same values as MILANF_SMP_MAX_CPUS /
+MILANF_IPI_SGI instead. Rather than wrap each of the three use sites in a
+nested #if, the file gets a small alias block at the top - the same idea as the
+nested form already used at machine_routines.c:962 and pe_fiq.c:172, just
+hoisted so the body stays board-neutral. The CPU name string goes the same
+way: "Kryo 660" on milanf, "Kryo 470" on sweet, because userland reads it out
+of the IORegistry.
+
+**Both of this driver's cross-file dependencies were already widened**, which
+is why it can be enabled now rather than after more plumbing:
+
+  - `sweet_secondary_entry` is defined in osfmk/arm64/start.s:282, inside
+    `#if defined(SWEET) || defined(MILANF)` - the physical PSCI CPU_ON entry
+    point, MMU and caches off, with the EL2 fallback.
+  - `sweet_cpu_signal_is_enabled` is osfmk/arm64/cpu.c:966, same widened
+    guard - the bring-up observer that waits for the self-SGI to clear
+    SIGPdisabled.
+
+Checked and left alone, because it looks like a gap and is not one:
+pe_fiq.c:109 reads `virtual-timer-intid` from the device tree under a guard
+that is still sweet-only, so milanf skips it and keeps the compiled-in
+default. That default is 19 on both boards (SWEET.h:67 and MILANF.h), and the
+unit's FDT has no `virtual-timer-intid` property at all - a scan of every
+property name in the tree finds none - so the skipped read would have failed
+and fallen through to the same 19. If that ever changes it is a one-line
+guard widen, not a value to guess.
+
+Verified without a compiler: apply --check exit 0, then a real apply to the
+ci-tail scratch tree - both files cleanly, CR=0 in sources and patch. Link
+unverified; CI in the morning.
+
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 2545cf9..b167484 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -1,11 +1,13 @@
+ /*
+- * A55 SMP bring-up for sweet using XNU's legacy IOCPU interface and PSCI.
++ * SMP bring-up for the Qualcomm boards (sweet / SM7150 Kryo 470,
++ * milanf / SM6375 Kryo 660) using XNU's legacy IOCPU interface and PSCI.
+  * The architected timer and SGI1 already enter through pe_fiq/sleh_irq.
+- * CPU_OFF, suspend and the A76 cores still require separate platform work.
++ * CPU_OFF, suspend and the big-cluster cores still require separate
++ * platform work.
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ #include <IOKit/IOCPU.h>
+ #include <IOKit/IOLib.h>
+ #include <libkern/c++/OSData.h>
+@@ -18,6 +20,22 @@
+ #include <mach/mach_time.h>
+ #include <pexpert/pexpert.h>
+ 
++/*
++ * Board parameters. Both boards publish these under their own names
++ * in pexpert/arm64/SWEET.h and MILANF.h; these aliases keep the rest
++ * of the file board-neutral. The name string is what userland reads
++ * out of the IORegistry.
++ */
++#if defined(MILANF)
++#define SWEET_CPU_MAX_CPUS   MILANF_SMP_MAX_CPUS
++#define SWEET_CPU_IPI_SGI    MILANF_IPI_SGI
++#define SWEET_CPU_NAME       "Kryo 660"
++#else
++#define SWEET_CPU_MAX_CPUS   SWEET_SMP_MAX_CPUS
++#define SWEET_CPU_IPI_SGI    SWEET_IPI_SGI
++#define SWEET_CPU_NAME       "Kryo 470"
++#endif
++
+ extern "C" void sweet_secondary_entry(void);
+ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+ 
+@@ -73,16 +91,21 @@ SweetCPU::start(IOService *provider)
+ 	if (*(const uint32_t *)reg->getBytesNoCopy() != cpu->phys_id) {
+ 		return false;
+ 	}
+-	/* MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76 */
++	/*
++	 * MPIDR Aff1 = core: 0x000-0x500 little cluster, 0x600/0x700 big
++	 * cluster. Read off each board's own DTB: sweet is Kryo 470
++	 * (A55/A76), milanf is Kryo 660 (A55/A78), and both put Aff0 = 0
++	 * on all eight cores.
++	 */
+ 	if (cpu->phys_id > 0x700 || (cpu->phys_id & 0xff) != 0 ||
+-	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
++	    topology->num_cpus > SWEET_CPU_MAX_CPUS) {
+ 		panic("SWEET CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
+ 		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
+ 	}
+ 	if (!IOCPU::start(provider)) {
+ 		return false;
+ 	}
+-	cpuName = OSSymbol::withCStringNoCopy("Kryo 470");
++	cpuName = OSSymbol::withCStringNoCopy(SWEET_CPU_NAME);
+ 	if (cpuName == NULL) {
+ 		return false;
+ 	}
+@@ -129,7 +152,7 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+ 	uint32_t requested = 1;
+ 	PE_parse_boot_argn("cpus", &requested, sizeof(requested));
+ 	IOLog("SWEET CPU: requested=%u selected=%u (limit=%u)\n",
+-	    requested, topology->num_cpus, SWEET_SMP_MAX_CPUS);
++	    requested, topology->num_cpus, SWEET_CPU_MAX_CPUS);
+ 
+ 	uint64_t deadline;
+ 	nanoseconds_to_deadline(10 * NSEC_PER_SEC, &deadline);
+@@ -223,7 +246,7 @@ SweetCPU::signalCPU(IOCPU *target)
+ 	uint64_t sgi = (((mpidr >> 32) & 0xff) << 48) |
+ 	    (((mpidr >> 16) & 0xff) << 32) |
+ 	    (((mpidr >> 8) & 0xff) << 16) |
+-	    ((uint64_t)SWEET_IPI_SGI << 24) | (1ULL << aff0);
++	    ((uint64_t)SWEET_CPU_IPI_SGI << 24) | (1ULL << aff0);
+ 	__builtin_arm_dsb(DSB_ISHST);
+ 	__builtin_arm_wsr64("ICC_SGI1R_EL1", sgi);
+ 	__builtin_arm_isb(ISB_SY);
+@@ -268,4 +291,4 @@ SweetCPU::getCPUName(void)
+ {
+ 	return cpuName;
+ }
+-#endif /* SWEET */
++#endif /* SWEET || MILANF */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 813de74..757aeb1 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -84,12 +84,13 @@ const char * gIOKernelConfigTables =
+     "   },"
+ #elif defined(ARM64_BOARD_CONFIG_MILANF)
+     /*
+-     * milanf gets the platform expert plus the two services a device with
+-     * no passcode and no reset path needs: AppleKeyStore and IOWatchdog.
+-     * Every other Sweet* driver is still an empty translation unit on this
+-     * board, and a personality whose class does not exist only earns
+-     * an IOKit "can't find class" line. They come back one at a time,
+-     * each with its own board values and its own personality here.
++     * milanf gets the platform expert, the CPU driver, and the two
++     * services a device with no passcode and no reset path needs:
++     * AppleKeyStore and IOWatchdog. Every other Sweet* driver is still
++     * an empty translation unit on this board, and a personality
++     * whose class does not exist only earns an IOKit "can't find
++     * class" line. They come back one at a time, each with its own
++     * board values and its own personality here.
+      *
+      * IONameMatch is "xiaomi,sweet" and that is deliberate, not a
+      * copy-paste slip: the milanf ADT root compatible list is
+@@ -105,6 +106,12 @@ const char * gIOKernelConfigTables =
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
+     "   {"
++    "     'IOClass'         = SweetCPU;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'qcom,kryo660';"
++    "     'IOProbeScore'    = 10000:32;"
++    "   },"
++    "   {"
+     "     'IOClass'         = AppleKeyStore;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = AppleKeyStore;"

@@ -683,6 +683,86 @@ CR=0. Also built a cumulative tree (`ci-art4` = `ci-art3` + 0086-0090) because
 0091 had to be *generated* against post-0088 content; the generator is
 `mk0091.py` and it diffs that tree.
 
+### >>> 2026-10-25: 0092, the CPU driver - zero SoC constants <<<
+
+First driver in the set whose SoC-specific surface is genuinely **zero**. The
+only constant in `SweetCPU.cpp` (271 lines) is the PSCI function ID
+`0xC4000003` for CPU_ON, and that is SMCCC - a numbered function in a firmware
+calling convention, not a memory-mapped address - so it is identical on any
+PSCI 0.2+ implementation. Everything else is either architected (Aff1/Aff0 in
+MPIDR, `ICC_SGI1R_EL1`, the redistributor SGI enable) or read from the topology
+`ml_topology` builds out of the ADT.
+
+So the question was not "does this hardware exist" but "does this board's
+topology look like what the validation code assumes". Rather than assume,
+read it off the unit's own DTB with a new `tools/fdt-cpus.py`:
+
+```
+/cpus/cpu@0    reg=0x0 0x0    enable-method=psci   compatible=qcom,kryo
+/cpus/cpu@100  reg=0x0 0x100
+...            through cpu@700 reg=0x0 0x700
+```
+
+Eight cores, Aff1 = 0x0-0x7, **Aff0 = 0 on every one**, `enable-method psci`.
+That is exactly the shape sweet's validation accepts
+(`phys_id > 0x700 || (phys_id & 0xff) != 0` -> panic), so it passes unchanged.
+`cpu-map` in the same tree is cluster0/core0-5 + cluster1/core0-1, the
+little/big split `ml_topology` derives; `num_cpus > SWEET_SMP_MAX_CPUS` is 8 on
+both boards, so that bound is a no-op difference too.
+
+**The one real edit is the match string.** The DTB says `compatible =
+"qcom,kryo"` on the cpu nodes, but IOKit does not match the raw DTB - it
+matches the **ADT**, and `tools/mkadt-milanf.py` publishes `qcom,kryo660`
+there (`CPU_COMPATIBLE`, L116, read off mainline `sm6375.dtsi`: cores 0-5
+A55 to 1.80 GHz, 6-7 A78 to 2.21 GHz). So the milanf personality carries
+`qcom,kryo660` where sweet's carries `qcom,kryo470`. A wrong match string is
+the quietest possible failure here: the class compiles, the personality
+loads, nothing ever calls `start()`, and the board looks like it has a CPU
+driver.
+
+Two board macros needed handling rather than duplication: `SWEET_SMP_MAX_CPUS`
+and `SWEET_IPI_SGI` live only in `SWEET.h`; `MILANF.h` publishes
+`MILANF_SMP_MAX_CPUS` (8) and `MILANF_IPI_SGI` (1) - same values. Instead of
+nesting `#if` at each of the three use sites, the file gets a small alias block
+at the top (`SWEET_CPU_MAX_CPUS` / `SWEET_CPU_IPI_SGI` / `SWEET_CPU_NAME`),
+same idea as the nested form at `machine_routines.c:962` and `pe_fiq.c:172`,
+just hoisted so the body stays board-neutral. The CPU name string goes the same
+way - "Kryo 660" vs "Kryo 470" - because userland reads it out of the
+IORegistry and a 660 reporting as a 470 is a lie in the one place it is
+cheapest to avoid.
+
+Generator ordering trap worth recording: the alias block's `#else` arm mentions
+`SWEET_SMP_MAX_CPUS` literally, so rewriting the use sites *after* inserting
+the block made the "expected 2 occurrences" assertion see 3. The generator now
+rewrites the body first, then inserts the aliases.
+
+**Both cross-file dependencies were already widened**, which is why this one
+could land now:
+
+| symbol | definition | guard |
+| --- | --- | --- |
+| `sweet_secondary_entry` | `osfmk/arm64/start.s:282` | `#if defined(SWEET) \|\| defined(MILANF)` |
+| `sweet_cpu_signal_is_enabled` | `osfmk/arm64/cpu.c:966` | `#if defined(SWEET) \|\| defined(MILANF)` |
+
+Full identifier scan of the file: the only things it reaches outside itself are
+those two. `sweet_cpus`, `sweet_cpus_registered` and `sweet_psci_cpu_on` are
+file-local statics, `SweetCPU` is its own class.
+
+**Checked and deliberately left alone, because it looks like a gap and is not:**
+`pe_fiq.c:109` reads `virtual-timer-intid` from the device tree under a guard
+that is still sweet-only, so milanf skips the read and keeps the compiled-in
+default. The default is 19 on both boards (`SWEET.h:67`, `MILANF.h:69`), and a
+scan of every property name in this unit's FDT finds no `virtual-timer-intid`
+property at all - so the skipped read would have failed and fallen through to
+the same 19 anyway. If that ever changes it is a one-line guard widen, not a
+value to guess.
+
+Verified: fresh copy of `ci-art3`, apply 0086 through 0092 one at a time in
+order, every one exit 0, every touched file CR=0, patch CR=0. `tailtree.py`
+now rebuilds `ci-tail` from the pristine base plus every tail patch, so
+0093 can be generated against post-0092 content without hand-managing
+`ci-art5`. Link unverified; CI in the morning.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
