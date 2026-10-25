@@ -763,6 +763,73 @@ now rebuilds `ci-tail` from the pristine base plus every tail patch, so
 0093 can be generated against post-0092 content without hand-managing
 `ci-art5`. Link unverified; CI in the morning.
 
+### >>> 2026-10-25: 0093, the crypto that was NULL - a boot stop, not polish <<<
+
+Found by finally sitting down with the guard inventory instead of the driver
+list. The inventory said "18 sites in libkern/crypto" and the natural reading
+was "the kernel has no AES, cosmetic". The real reading: **on milanf the first
+`SHA256_Init()` in the kernel dereferences a NULL function table.**
+
+`register_crypto.c` defines `SECURITY_READ_ONLY_LATE(crypto_functions_t)
+g_crypto_funcs = NULL;` and `crypto_register_functions()` is its only writer -
+called by the corecrypto kext on Apple hardware. There is no such kext on this
+port, so `g_crypto_funcs` is NULL for the whole life of the kernel.
+
+Sweet answered that by giving the five legacy digest/cipher entry points
+portable implementations, selected at compile time, each in a
+`#if defined(ARM64_BOARD_CONFIG_SWEET)` arm whose `#else` is the corecrypto
+call. On milanf the `#else` is taken. Sites that are **not** board-gated:
+
+| call | site |
+| --- | --- |
+| `SHA256_Init/Update/Final` | `bsd/kern/kern_exec.c:6046` - bootsession UUID/CDHash digest, i.e. the first exec of launchd |
+| `SHA256_Init` | `osfmk/vm/vm_kern.c:4066` |
+| `SHA256_Init` | `osfmk/ipc/ipc_kmsg.c:551` |
+| `SHA256_*` | `bsd/kern/chunklist.c:251/390` |
+| `MD5_*` | `bsd/net/pf.c:4464`, `bsd/netinet/tcp_subr.c:2772` |
+| `SHA1_*` | `bsd/netinet6/in6_ifattach.c:133`, `iokit/Kernel/IOPlatformExpert.cpp:2193` |
+| `aes_encrypt_key` | `bsd/netinet6/esp_rijndael.c:111` |
+
+`osfmk/prng/entropy.c` was already widened (0084 or thereabouts) and calls
+`ccdigest_init(&ccsha256_ltc_di, ...)` directly, which is exactly why the
+earliest boot does not fall over. The hole opens at the **first userspace
+exec** - deep enough in that the panic would have looked like something else
+entirely, and after we had already spent a night believing 0090 had cleared the
+last hard stop.
+
+The fix is mechanical precisely because sweet did the work: widen the arm so
+MILANF takes the portable path. Nineteen files, twenty gates. Nothing new is
+written and there is no per-board value involved - neither board has a
+corecrypto kext, so both want the same answer. This is the first patch in the
+series where "match sweet" is not a shortcut but the correct reasoning.
+
+The 15 `sweet_*.c` files are four-line TUs that `#include` one staged BearSSL
+source each. They are already in `libkern/conf/files` as `optional crypto` with
+**no** board condition, and `0020-stage-bearssl.sh` already selects on
+`SWEET|MILANF`, so the sources are fetched for a milanf build today - only the
+per-file gates were keeping them out. No new build dependency, no new CI step.
+`crypto` and `CRYPTO_SHA2` are unconditional in `config/MASTER` (L173/174), so
+`optional crypto` is compiled regardless of `MASTER.arm64.milanf`'s option
+list.
+
+**Two process lessons, both expensive enough to write down:**
+
+1. `guards.py` counts an `#if SWEET ... #else ... #endif` chain as "covered"
+   because milanf gets the else arm. That is right when the else arm is
+   board-neutral and catastrophically wrong when it is the corecrypto path.
+   The tool now reports those as a separate class ("falls back to the generic
+   arm") rather than folding them into "fine" - that distinction is what found
+   this.
+2. 0093 was first generated against a `ci-tail` that **already had 0093
+   applied**, so the `expected 1 occurrence, found 0` assertion fired and the
+   patch was produced against already-patched sources. Generators now take
+   `TAILTREE` from the environment, and the rule for every tail patch is:
+   `py tailtree.py --upto N-1 --out ci-tail<NN>` then generate N against it.
+   `ci-tail92` is the 0093 base.
+
+Verified: fresh `ci-art3`, 0086-0093 one at a time in order, every one exit 0,
+CR=0 in sources and patch. Link unverified; CI in the morning.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

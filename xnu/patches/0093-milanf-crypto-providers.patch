@@ -1,0 +1,381 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: give the kernel its crypto back - this one is a boot stop
+
+Found while working the guard inventory, and it outranks everything else on
+the list because it is not a missing feature: on milanf today the first
+`SHA256_Init()` in the kernel dereferences a NULL function table.
+
+`libkern/crypto/register_crypto.c` defines
+
+    SECURITY_READ_ONLY_LATE(crypto_functions_t) g_crypto_funcs = NULL;
+
+and `crypto_register_functions()` is the only writer. On Apple hardware the
+corecrypto kext calls it. There is no such kext here, so on this port
+`g_crypto_funcs` is NULL for the life of the kernel.
+
+The sweet port dealt with that by giving the five legacy digest/cipher
+entry points their own portable implementations, chosen at compile time:
+
+    corecrypto_sha2.c   SHA-256 -> ccdigest_init(&ccsha256_ltc_di, ...)
+                        SHA-384/512 -> BearSSL (sweet_sha2big.c)
+    corecrypto_sha1.c   -> BearSSL (sweet_sha1.c)
+    corecrypto_md5.c    -> BearSSL (sweet_md5.c)
+    corecrypto_aes.c    -> BearSSL bitslice AES (sweet_aes.c)
+
+Every one of those choices sits in a `#if defined(ARM64_BOARD_CONFIG_SWEET)`
+arm with the corecrypto call as the `#else`. So on milanf the file compiles,
+the `#else` arm is taken, and:
+
+| call | site | result on milanf, today |
+| --- | --- | --- |
+| `SHA256_Init/Update/Final` | `bsd/kern/kern_exec.c:6046` | NULL deref on the first exec |
+| `SHA256_Init` | `osfmk/vm/vm_kern.c:4066` | NULL deref in the address hash |
+| `SHA256_Init` | `osfmk/ipc/ipc_kmsg.c:551` | NULL deref on kmsg scrubbing |
+| `SHA256_*` | `bsd/kern/chunklist.c:251/390` | NULL deref |
+| `MD5_*` | `bsd/net/pf.c:4464`, `bsd/netinet/tcp_subr.c:2772` | NULL deref |
+| `SHA1_*` | `bsd/netinet6/in6_ifattach.c:133`, `iokit/Kernel/IOPlatformExpert.cpp:2193` | NULL deref |
+| `aes_encrypt_key` | `bsd/netinet6/esp_rijndael.c:111` | NULL deref |
+
+`kern_exec.c:6046` is the one that matters: it is the bootsession-UUID/CDHash
+digest on the exec path, so the first `execve` of launchd takes the machine
+down. `osfmk/prng/entropy.c` was already widened by an earlier patch and calls
+`ccdigest_init(&ccsha256_ltc_di, ...)` directly, which is why the very earliest
+boot does not fall over - the hole opens at the first userspace exec, which is
+far enough in to look like an unrelated crash.
+
+The fix is the two-dozen-line mechanical one, and it is mechanical precisely
+because the sweet port already did the work: widen the arm so MILANF takes the
+portable path too. Nothing new is written, no value is read off the DTB, and
+there is no behavioural difference between the two boards here - neither has a
+corecrypto kext, so both want the same answer.
+
+What the 15 `sweet_*.c` files are, since the names are misleading: each is a
+four-line translation unit that `#include`s one staged BearSSL source file.
+They exist as separate TUs so the build system can compile them under
+`optional crypto` without dragging BearSSL into a single blob, and they are
+already listed in `libkern/conf/files` with no board condition. The staging
+script (`0020-stage-bearssl.sh`) already selects on `SWEET|MILANF`, so the
+sources are fetched for a milanf build today; only the per-file gates were
+keeping them out. That means this patch adds no build-time dependency and no
+new CI step.
+
+Verified without a compiler: apply --check exit 0, then a real apply to the
+ci-tail scratch tree - nineteen files cleanly (twenty gates: `corecrypto_sha2.c`
+has two), CR=0 in sources and patch. Link unverified; CI in the morning.
+`crypto` and `CRYPTO_SHA2` are unconditional in `config/MASTER` (L173/L174), so
+the `optional crypto` files are compiled for milanf regardless of
+MASTER.arm64.milanf's option list.
+
+diff --git a/libkern/crypto/corecrypto_aes.c b/libkern/crypto/corecrypto_aes.c
+index 384abb6..60214fd 100644
+--- a/libkern/crypto/corecrypto_aes.c
++++ b/libkern/crypto/corecrypto_aes.c
+@@ -32,8 +32,12 @@
+ #include <corecrypto/ccaes.h>
+ #include <kern/debug.h>
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-/* SWEET has a built-in portable AES provider for the legacy CBC/ECB API. */
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
++/*
++ * These boards have a built-in portable AES provider for the legacy
++ * CBC/ECB API (sweet_aes.c). There is no corecrypto kext, so
++ * g_crypto_funcs stays NULL and this is the only working arm.
++ */
+ extern const struct ccmode_cbc sweet_aes_cbc_encrypt;
+ extern const struct ccmode_cbc sweet_aes_cbc_decrypt;
+ #define AES_CBC_ENCRYPT_MODE (&sweet_aes_cbc_encrypt)
+diff --git a/libkern/crypto/corecrypto_md5.c b/libkern/crypto/corecrypto_md5.c
+index e9bbc42..70405f6 100644
+--- a/libkern/crypto/corecrypto_md5.c
++++ b/libkern/crypto/corecrypto_md5.c
+@@ -17,12 +17,13 @@ setCount(MD5_CTX *ctx, uint64_t count)
+ }
+ 
+ /* Copy a ccdigest ctx into a legacy MD5 context */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ /*
+- * SWEET has no corecrypto kext (g_crypto_funcs stays NULL). MD5 uses
+- * BearSSL's portable implementation (libkern/crypto/sweet_md5.c), with
+- * MD5_CTX carrying exactly its state: chaining value, byte count and the
+- * partial block, converted around each call like the corecrypto path does.
++ * These boards have no corecrypto kext (g_crypto_funcs stays NULL).
++ * MD5 uses BearSSL's portable implementation
++ * (libkern/crypto/sweet_md5.c), with MD5_CTX carrying exactly its state:
++ * chaining value, byte count and the partial block, converted around
++ * each call like the corecrypto path does.
+  */
+ #include "sweet_bearssl/inc/bearssl_hash.h"
+ 
+@@ -71,7 +72,7 @@ MD5Final(unsigned char digest[MD5_DIGEST_LENGTH], MD5_CTX *ctx)
+ 	br_md5_out(&br_ctx, digest);
+ }
+ 
+-#else /* !ARM64_BOARD_CONFIG_SWEET */
++#else /* !ARM64_BOARD_CONFIG_SWEET && !ARM64_BOARD_CONFIG_MILANF */
+ 
+ static void
+ DiToMD5(const struct ccdigest_info *di, struct ccdigest_ctx *di_ctx, MD5_CTX *md5_ctx)
+@@ -125,4 +126,4 @@ MD5Final(unsigned char digest[MD5_DIGEST_LENGTH], MD5_CTX *ctx)
+ 	ccdigest_final(di, di_ctx, digest);
+ }
+ 
+-#endif /* !ARM64_BOARD_CONFIG_SWEET */
++#endif /* !ARM64_BOARD_CONFIG_SWEET && !ARM64_BOARD_CONFIG_MILANF */
+diff --git a/libkern/crypto/corecrypto_sha1.c b/libkern/crypto/corecrypto_sha1.c
+index 409533d..65224c1 100644
+--- a/libkern/crypto/corecrypto_sha1.c
++++ b/libkern/crypto/corecrypto_sha1.c
+@@ -16,12 +16,13 @@ setCount(SHA1_CTX *ctx, uint64_t count)
+ 	ctx->c.b64[0] = count;
+ }
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ /*
+- * SWEET has no corecrypto kext (g_crypto_funcs stays NULL). SHA-1 uses
+- * BearSSL's portable implementation (libkern/crypto/sweet_sha1.c), with
+- * SHA1_CTX carrying exactly its state: chaining value, byte count and the
+- * partial block, converted around each call like the corecrypto path does.
++ * These boards have no corecrypto kext (g_crypto_funcs stays NULL).
++ * SHA-1 uses BearSSL's portable implementation
++ * (libkern/crypto/sweet_sha1.c), with SHA1_CTX carrying exactly its state:
++ * chaining value, byte count and the partial block, converted around
++ * each call like the corecrypto path does.
+  */
+ #include "sweet_bearssl/inc/bearssl_hash.h"
+ 
+@@ -70,7 +71,7 @@ SHA1Final(void *digest, SHA1_CTX *ctx)
+ 	br_sha1_out(&br_ctx, digest);
+ }
+ 
+-#else /* !ARM64_BOARD_CONFIG_SWEET */
++#else /* !ARM64_BOARD_CONFIG_SWEET && !ARM64_BOARD_CONFIG_MILANF */
+ 
+ /* Copy a ccdigest ctx into a legacy SHA1 context */
+ static void
+@@ -125,7 +126,7 @@ SHA1Final(void *digest, SHA1_CTX *ctx)
+ 	ccdigest_final(di, di_ctx, digest);
+ }
+ 
+-#endif /* !ARM64_BOARD_CONFIG_SWEET */
++#endif /* !ARM64_BOARD_CONFIG_SWEET && !ARM64_BOARD_CONFIG_MILANF */
+ 
+ /* This is not publicised in header, but exported in libkern.exports */
+ void SHA1Final_r(SHA1_CTX *context, void *digest);
+diff --git a/libkern/crypto/corecrypto_sha2.c b/libkern/crypto/corecrypto_sha2.c
+index c954dd2..e5a3d79 100644
+--- a/libkern/crypto/corecrypto_sha2.c
++++ b/libkern/crypto/corecrypto_sha2.c
+@@ -34,13 +34,13 @@
+ 
+ #if defined(CRYPTO_SHA2)
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ /*
+- * SWEET has no corecrypto kext, so g_crypto_funcs stays NULL. SHA-256 uses
+- * XNU's built-in implementation directly, as the SWEET PRNG does; this also
+- * serves code-signing page hashes. SHA-384/512 use BearSSL's portable
+- * implementation (libkern/crypto/sweet_sha2big.c), its context stored in
+- * the caller's SHA384_CTX/SHA512_CTX.
++ * These boards have no corecrypto kext, so g_crypto_funcs stays NULL.
++ * SHA-256 uses XNU's built-in implementation directly, as the PRNG does;
++ * this also serves code-signing page hashes. SHA-384/512 use BearSSL's
++ * portable implementation (libkern/crypto/sweet_sha2big.c), its context
++ * stored in the caller's SHA384_CTX/SHA512_CTX.
+  */
+ #include <corecrypto/ccsha2.h>
+ #define SHA256_DI()                     (&ccsha256_ltc_di)
+@@ -84,7 +84,7 @@ SHA256_Final(void *digest, SHA256_CTX *ctx)
+ 	ccdigest_final(di, ctx->ctx, digest);
+ }
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/inc/bearssl_hash.h"
+ 
+ _Static_assert(sizeof(br_sha384_context) <= sizeof(SHA512_CTX),
+@@ -127,7 +127,7 @@ SHA512_Final(void *digest, SHA512_CTX *ctx)
+ 	br_sha512_out(BR_CTX(ctx), digest);
+ }
+ 
+-#else /* !ARM64_BOARD_CONFIG_SWEET */
++#else /* !ARM64_BOARD_CONFIG_SWEET && !ARM64_BOARD_CONFIG_MILANF */
+ 
+ void
+ SHA384_Init(SHA384_CTX *ctx)
+@@ -194,7 +194,7 @@ SHA512_Final(void *digest, SHA512_CTX *ctx)
+ 	ccdigest_final(di, ctx->ctx, digest);
+ }
+ 
+-#endif /* !ARM64_BOARD_CONFIG_SWEET */
++#endif /* !ARM64_BOARD_CONFIG_SWEET && !ARM64_BOARD_CONFIG_MILANF */
+ 
+ #else
+ 
+diff --git a/libkern/crypto/sweet_aes.c b/libkern/crypto/sweet_aes.c
+index 21be4eb..a1a0b97 100644
+--- a/libkern/crypto/sweet_aes.c
++++ b/libkern/crypto/sweet_aes.c
+@@ -1,10 +1,11 @@
+ /*
+- * SWEET legacy AES CBC/ECB provider backed by BearSSL's portable bitslice AES.
++ * Legacy AES CBC/ECB provider for the Qualcomm boards (sweet, milanf),
++ * backed by BearSSL's portable bitslice AES.
+  * Upstream sources and MIT license are staged by 0020-stage-bearssl.sh.
+  * No heap, SIMD or CPU crypto extension is needed. Contexts can be copied:
+  * their only pointer is the immutable BearSSL class descriptor.
+  */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include <libkern/libkern.h>
+ #include <libkern/crypto/aes.h>
+ #include <corecrypto/ccmode.h>
+@@ -108,4 +109,4 @@ const struct ccmode_cbc sweet_aes_cbc_decrypt = {
+     .init = sweet_aes_decrypt_init,
+     .cbc = sweet_aes_decrypt_cbc,
+ };
+-#endif /* ARM64_BOARD_CONFIG_SWEET */
++#endif /* ARM64_BOARD_CONFIG_SWEET || ARM64_BOARD_CONFIG_MILANF */
+diff --git a/libkern/crypto/sweet_aes_ct.c b/libkern/crypto/sweet_aes_ct.c
+index 684003b..83258da 100644
+--- a/libkern/crypto/sweet_aes_ct.c
++++ b/libkern/crypto/sweet_aes_ct.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/symcipher/aes_ct.c"
+ #endif
+diff --git a/libkern/crypto/sweet_aes_ct_cbcdec.c b/libkern/crypto/sweet_aes_ct_cbcdec.c
+index ea26fbb..59c1795 100644
+--- a/libkern/crypto/sweet_aes_ct_cbcdec.c
++++ b/libkern/crypto/sweet_aes_ct_cbcdec.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/symcipher/aes_ct_cbcdec.c"
+ #endif
+diff --git a/libkern/crypto/sweet_aes_ct_cbcenc.c b/libkern/crypto/sweet_aes_ct_cbcenc.c
+index 83ab8c3..f9ee6a7 100644
+--- a/libkern/crypto/sweet_aes_ct_cbcenc.c
++++ b/libkern/crypto/sweet_aes_ct_cbcenc.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/symcipher/aes_ct_cbcenc.c"
+ #endif
+diff --git a/libkern/crypto/sweet_aes_ct_dec.c b/libkern/crypto/sweet_aes_ct_dec.c
+index 52e2d6a..5873a4a 100644
+--- a/libkern/crypto/sweet_aes_ct_dec.c
++++ b/libkern/crypto/sweet_aes_ct_dec.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/symcipher/aes_ct_dec.c"
+ #endif
+diff --git a/libkern/crypto/sweet_aes_ct_enc.c b/libkern/crypto/sweet_aes_ct_enc.c
+index 6827157..cbc27e9 100644
+--- a/libkern/crypto/sweet_aes_ct_enc.c
++++ b/libkern/crypto/sweet_aes_ct_enc.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/symcipher/aes_ct_enc.c"
+ #endif
+diff --git a/libkern/crypto/sweet_dec32be.c b/libkern/crypto/sweet_dec32be.c
+index 7415ae8..1ae9ede 100644
+--- a/libkern/crypto/sweet_dec32be.c
++++ b/libkern/crypto/sweet_dec32be.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/codec/dec32be.c"
+ #endif
+diff --git a/libkern/crypto/sweet_dec32le.c b/libkern/crypto/sweet_dec32le.c
+index cc0414e..cee66c9 100644
+--- a/libkern/crypto/sweet_dec32le.c
++++ b/libkern/crypto/sweet_dec32le.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/codec/dec32le.c"
+ #endif
+diff --git a/libkern/crypto/sweet_dec64be.c b/libkern/crypto/sweet_dec64be.c
+index 15d924c..b5849dd 100644
+--- a/libkern/crypto/sweet_dec64be.c
++++ b/libkern/crypto/sweet_dec64be.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/codec/dec64be.c"
+ #endif
+diff --git a/libkern/crypto/sweet_enc32be.c b/libkern/crypto/sweet_enc32be.c
+index 179919b..631e384 100644
+--- a/libkern/crypto/sweet_enc32be.c
++++ b/libkern/crypto/sweet_enc32be.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/codec/enc32be.c"
+ #endif
+diff --git a/libkern/crypto/sweet_enc32le.c b/libkern/crypto/sweet_enc32le.c
+index ab7dbd1..a004ed9 100644
+--- a/libkern/crypto/sweet_enc32le.c
++++ b/libkern/crypto/sweet_enc32le.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/codec/enc32le.c"
+ #endif
+diff --git a/libkern/crypto/sweet_enc64be.c b/libkern/crypto/sweet_enc64be.c
+index b9a8e87..6b1359a 100644
+--- a/libkern/crypto/sweet_enc64be.c
++++ b/libkern/crypto/sweet_enc64be.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/codec/enc64be.c"
+ #endif
+diff --git a/libkern/crypto/sweet_md5.c b/libkern/crypto/sweet_md5.c
+index 2832b92..6256b20 100644
+--- a/libkern/crypto/sweet_md5.c
++++ b/libkern/crypto/sweet_md5.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/hash/md5.c"
+ #endif
+diff --git a/libkern/crypto/sweet_sha1.c b/libkern/crypto/sweet_sha1.c
+index 77365ed..211aa2a 100644
+--- a/libkern/crypto/sweet_sha1.c
++++ b/libkern/crypto/sweet_sha1.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/hash/sha1.c"
+ #endif
+diff --git a/libkern/crypto/sweet_sha2big.c b/libkern/crypto/sweet_sha2big.c
+index a405254..5920bdf 100644
+--- a/libkern/crypto/sweet_sha2big.c
++++ b/libkern/crypto/sweet_sha2big.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include "sweet_bearssl/src/hash/sha2big.c"
+ #endif
