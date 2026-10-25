@@ -3,7 +3,12 @@
 # dxb runs patches/*.sh from the XNU source root before applying *.patch.
 set -euo pipefail
 
-[[ "${MACHINE_CONFIG:-}" == SWEET ]] || exit 0
+# Shared by every machine config that builds the sweet port's filesystem stack:
+# SWEET and MILANF (which inherits sweet's configure-time feature set verbatim).
+case "${MACHINE_CONFIG:-}" in
+SWEET|MILANF) ;;
+*) exit 0 ;;
+esac
 [[ "${MACOS_VERSION:-}" == 13.5 ]] || {
     echo 'SWEET HFS integration requires xnu-8796.141.3 (macOS 13.5)' >&2
     exit 1
@@ -52,4 +57,4 @@ PY
 # Kernel builds use -nostdinc; HFS's kext-config.h needs the SDK's target macros.
 hfs_sdk=$(xcrun --sdk macosx --show-sdk-path)
 cp "$hfs_sdk/usr/include/TargetConditionals.h" bsd/sweet_hfs/
-echo "Staged hfs-627.100.6 ($hfs_sha) for SWEET"
+echo "Staged hfs-627.100.6 ($hfs_sha) for ${MACHINE_CONFIG:-SWEET}"

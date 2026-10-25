@@ -128,6 +128,29 @@ State of the milanf work (desk phase, no hardware yet):
   `androidboot.verifiedbootstate=orange` implied. BRINGUP §3 step 2 (the
   wipe) is already done; nothing needs wiping. Redundant dispatch
   `40146459409` also failed and can be ignored.
+- **The staged sources never ran for MILANF — second root cause (2026-10-24).**
+  Run `40151504141` (HEAD `f317eb5`) proved 0083 correct on the first try: the
+  MILANF compile lines now carry
+  `-DNOS_ARM_ASM -DNOS_ARM_PMAP -DMOCKFS -DSWEET_HFS -DBINDFS
+  -DCONFIG_PMAP_PPL` beside `-DARM64_BOARD_CONFIG_MILANF`, so the port's
+  configure-time feature set finally reaches the sources. The build then failed
+  on **39** targets, every one of them under `bsd/sweet_hfs/` (`core/*.c` 37,
+  `hfs_encodings/*.c` 2), and those files did not exist because all three
+  staging scripts opened with `[[ "${MACHINE_CONFIG:-}" == SWEET ]] || exit 0`:
+  `0019-stage-libpthread.sh` -> `bsd/pthread/sweet_libpthread`,
+  `0020-stage-bearssl.sh` -> `libkern/crypto/sweet_bearssl`,
+  `0026-stage-hfs.sh` -> `bsd/sweet_hfs`. Each ran, printed nothing and exited
+  0 (log L121-L123, immediately followed by the patch series), which is also
+  why `0031-sweet-read-write-root.patch` and `0041-sweet-hfs-link-notes.patch`
+  were skipped for missing `hfs_vfsutils.c` / `hfs_catalog.c`.
+  All three payloads are load-bearing for MILANF, not just SWEET:
+  `bsd/conf/files:371` lists `sweet_pthread_init.c` as `standard` (no option
+  guard at all) and `libkern/conf/files:100` lists `sweet_aes.c` as
+  `optional crypto` (crypto is on). Fix: the gate is now a `case` over
+  `SWEET|MILANF` in all three scripts, and the completion echoes name
+  `${MACHINE_CONFIG:-SWEET}` so a log line proves which config staged. `bash -n`
+  clean on all three. Note for local runs: the scripts need network (they fetch
+  pinned Apple commits from github.com/apple-oss-distributions) and `xcrun`.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
