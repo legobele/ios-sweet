@@ -94,6 +94,40 @@ State of the milanf work (desk phase, no hardware yet):
   says so.
 - House rules from AGENTS.md apply unchanged; no device dumps, serials, or
   Apple artifacts are in either repo.
+- **MILANF had no master config at all — root cause of the link failure
+  (2026-10-24).** Picked up the red CI run `39771690481` (HEAD `04f032f`)
+  and found the failure was 264 undefined symbols, not four: the whole
+  open-source asm + pmap surface (`CleanPoC_*`, `FlushPo*`, `_start`,
+  `kernel_pmap`, `pmap_*`, `Idle_context`, ...). Cause is upstream of the
+  linker: `doconf` only adds `MASTER.<arch>.<soc>` when
+  `$(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)`
+  exists (`bsd/conf/Makefile`, `iokit/conf/Makefile`), `CURRENT_MACHINE_CONFIG_LC`
+  is `milanf` (`makedefs/MakeInc.def:48`), and no `config/MASTER.arm64.milanf`
+  was ever authored — 0082 only added MILANF to
+  `SUPPORTED_ARM64_MACHINE_CONFIGS` and its `MACHINE_FLAGS_ARM64_MILANF`.
+  So every MILANF CI run so far configured against the generic
+  `MASTER` + `MASTER.arm64`. Proof from the run's own generated headers in
+  the uploaded `xnu-buildtree` artifact:
+  `nos_arm_asm.h NNOS_ARM_ASM 0`, `nos_arm_pmap.h NNOS_ARM_PMAP 0`,
+  `mockfs.h NMOCKFS 0`, `sweet_hfs.h NSWEET_HFS 0`. The sleh.c error of
+  the earlier run was a side effect of the same hole (board define MILANF
+  reached the sources, the port's config did not).
+  Fix: new patch `xnu/patches/0083-milanf-master-config.patch` adds
+  `config/MASTER.arm64.milanf`, body byte-identical to the fully patched
+  `MASTER.arm64.sweet` (nos_arm_asm, nos_arm_pmap, mockfs, sweet_hfs,
+  bindfs, kperf/kpc, FILESYS/NETWORKING/... lists), only the header comment
+  differs. Verified locally: `git apply --check` clean against the
+  0082-state tree, and `Compare-Object` against `MASTER.arm64.sweet` shows
+  the comment block as the sole difference. Note the consequence: with the
+  master in place the MILANF kernel finally builds mockfs/sweet_hfs/bindfs,
+  i.e. the port's whole filesystem stack, so the next CI run can fail in
+  new places — that is progress, not regression.
+  Also: `fastboot getvar all` on the unit reports
+  `securestate: flashing_unlocked`, `verity-state: disabled (0)`,
+  `secure: yes`; the bootloader itself confirms the unlock that
+  `androidboot.verifiedbootstate=orange` implied. BRINGUP §3 step 2 (the
+  wipe) is already done; nothing needs wiping. Redundant dispatch
+  `40146459409` also failed and can be ignored.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
