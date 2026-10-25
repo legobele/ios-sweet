@@ -830,6 +830,77 @@ list.
 Verified: fresh `ci-art3`, 0086-0093 one at a time in order, every one exit 0,
 CR=0 in sources and patch. Link unverified; CI in the morning.
 
+### >>> 2026-10-25: 0094, the panic waiting at the root handoff <<<
+
+With crypto closed, the next thing on the inventory was `iokit/Kernel` and the
+first file in it was `IOService.cpp`. Three board gates, and all three are the
+same sentence said three ways: **this board has no IOStorageFamily.** No
+`IOMedia` class, no `IOBlockStorageDriver` class, because neither is in the
+tree - the only file in the whole source op that mentions them is
+`iokit/IOKitUser/IOBlockStorageDevice.h`, a userspace header.
+
+Sweet taught the two affected functions to cope. Milanf takes Apple's arms
+instead, and both of Apple's arms `assert`.
+
+**Why this was a live stop and not a tidy-up.** 0089 routes the root device
+through `sweet_ufs`, and the hook it added to `IOFindBSDRoot` ends in
+`goto iofrootx` - which is the label on the line immediately above
+
+```c
+iofrootx:
+
+	IOService::setRootMedia(service);
+```
+
+`setRootMedia()` looks up `IOBlockStorageDriver`, gets NULL, and under the
+`#else` - milanf today - reaches `assert(ioblockstoragedriverClass)`. `assert()`
+in `osfmk/kern/assert.h` is a real `__Panic`, not a DEVELOPMENT-only no-op.
+So the first boot would have printed `BSD root: ufsroot0, major 3, minor 0`
+from 0089 and died one line later:
+
+```
+IOService.cpp:5200 Assertion failed: ioblockstoragedriverClass
+```
+
+And fixing only that one would have moved the panic eleven lines down:
+`publishHiddenMedia()` carries the mirror-image assert under the *opposite*
+gate, `#if !defined(ARM64_BOARD_CONFIG_SWEET)`, and it is called from the tail
+of `setRootMedia()` itself.
+
+| line | before | after |
+| --- | --- | --- |
+| 5129 | `#if !defined(...SWEET)` | `&& !defined(...MILANF)` |
+| 5140 | `#if defined(...SWEET)` | `\|\| defined(...MILANF)` |
+| 5191 | `#if defined(...SWEET)` | `\|\| defined(...MILANF)` |
+
+**The 5129 site is the only negated board gate in the entire tree**, and it
+exposed a structural blind spot in `guards.py`: a negated gate does not *lose*
+milanf code, it *keeps* Apple code milanf cannot run. The inventory only ever
+counted lost code, so this whole class was invisible to it by construction -
+which means the "41 then 26 then 25 sites" numbers were never the complete
+worklist. The tool now reports negated gates as a second class. There was
+exactly one more of them in the tree, and it is 0095.
+
+**What the widened arm actually does**, because "it compiles now" is not the
+interesting part: with `ioblockstoragedriverClass` NULL, `setRootMedia()` sets
+`root = NULL`, walks nothing, records `gIOServiceRootMediaParent = NULL` and
+hands that to `publishHiddenMedia()`. There `iomediaClass` is NULL too,
+`wasHiding` is forced false, and `applyToInstances()` is skipped - so no
+service is ever dereferenced through a missing meta class. The root vnode came
+from `sweet_ufs_rootdev()` several lines earlier; this call only maintains
+registry bookkeeping that has nothing to track. `service` itself is NULL on
+this path (it is assigned from `waitForMatchingService()` at the top of
+`IOFindBSDRoot` and `OSSafeReleaseNULL`'d right after), so the `goto` skipping
+the rest of the device search costs nothing either.
+
+That NULL-worth-checking detail matters: `setRootMedia()` is a `static` method
+taking `IOService * root`, and the sweet arm nulls the local before the
+`while (root)` walk. If it did not, the ufsroot0 path would hand it a NULL and
+deref it. The arm is load-bearing, not cosmetic.
+
+Verified: fresh `ci-art3`, 0086-0094 one at a time in order, every one exit 0,
+CR=0 in source and patch. Link unverified; CI in the morning.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

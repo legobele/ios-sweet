@@ -1,0 +1,106 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: survive having no IOStorageFamily at the root handoff
+
+`iokit/Kernel/IOService.cpp` carries three board gates and all three are about
+one fact: sweet and milanf both run without IOStorageFamily, so neither
+`IOMedia` nor `IOBlockStorageDriver` is a registered OS meta class. Sweet
+taught the two affected functions to cope; the gates that teach them are
+spelled `#if defined(ARM64_BOARD_CONFIG_SWEET)`, so milanf takes Apple's arms
+and both of Apple's arms assert.
+
+Why this is a live stop and not a tidy-up: 0089 routes the root device through
+sweet_ufs and `IOFindBSDRoot` jumps to its `iofrootx` label, which is the line
+immediately above the first call -
+
+    iofrootx:
+        IOService::setRootMedia(service);
+
+`setRootMedia()` looks up `IOBlockStorageDriver`, gets NULL, and under
+`#else` (milanf today) reaches
+
+    assert(ioblockstoragedriverClass);
+
+`assert()` in `osfmk/kern/assert.h` is a real `__Panic`, not a DEVELOPMENT-only
+no-op. So the first boot reaches the root handoff, prints `BSD root:
+ufsroot0, major 3, minor 0` from 0089, and dies one line later with
+
+    IOService.cpp:5200 Assertion failed: ioblockstoragedriverClass
+
+`publishHiddenMedia()`, called from the tail of `setRootMedia()`, carries the
+mirror-image assert under the opposite gate (`#if !defined(...SWEET)`), so
+fixing only the first one just moves the panic eleven lines down to
+`IOService.cpp:5130`.
+
+Three edits, all the mechanical widening this series has used throughout:
+
+| line | before | after |
+| --- | --- | --- |
+| 5129 | `#if !defined(ARM64_BOARD_CONFIG_SWEET)` | `&& !defined(ARM64_BOARD_CONFIG_MILANF)` |
+| 5140 | `#if defined(ARM64_BOARD_CONFIG_SWEET)` | `\|\| defined(ARM64_BOARD_CONFIG_MILANF)` |
+| 5191 | `#if defined(ARM64_BOARD_CONFIG_SWEET)` | `\|\| defined(ARM64_BOARD_CONFIG_MILANF)` |
+
+The 5129 site is the only negated board gate in the entire tree, which makes it
+the one place where `guards.py` reads backwards: a negated gate does not lose
+milanf code, it *keeps* Apple code milanf cannot run. The inventory only tracks
+lost code, so this class of site is invisible to it by construction - worth
+knowing before trusting the remaining 26 sites as the complete worklist.
+
+No new value is read off the DTB here and nothing board-specific is written:
+both boards answer "no IOStorageFamily" the same way, so the widened arms are
+the same arms. Comments are reworded board-neutrally, since "SWEET has no
+IOStorageFamily" stops being true of the gate once milanf shares it.
+
+Consequence worth stating because it changes what the code does: with
+`ioblockstoragedriverClass` NULL, `setRootMedia()` sets `root = NULL`, walks
+nothing, records `gIOServiceRootMediaParent = NULL` and hands that to
+`publishHiddenMedia()`. There, `iomediaClass` is NULL too, `wasHiding` is
+forced false, and `applyToInstances()` is skipped - so no service is ever
+dereferenced through a missing meta class. The root vnode was already produced
+by `sweet_ufs_rootdev()`; this call only maintains registry bookkeeping that
+has nothing to track.
+
+Verified without a compiler: fresh ci-art3, 0086-0094 applied one at a time in
+order, every one exit 0, every touched file CR=0, patch CR=0. Link unverified;
+CI in the morning.
+
+diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
+index 59c834e..a360c75 100644
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -5126,7 +5126,7 @@ IOService::publishHiddenMedia(IOService * parent)
+ 	bool                wasHiding;
+ 
+ 	iomediaClass = OSMetaClass::getMetaClassWithName(gIOMediaKey);
+-#if !defined(ARM64_BOARD_CONFIG_SWEET)
++#if !defined(ARM64_BOARD_CONFIG_SWEET) && !defined(ARM64_BOARD_CONFIG_MILANF)
+ 	assert(iomediaClass);
+ #endif
+ 
+@@ -5137,8 +5137,11 @@ IOService::publishHiddenMedia(IOService * parent)
+ 	}
+ 	UNLOCKNOTIFY();
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-	/* SWEET has no IOStorageFamily: without the IOMedia class no media exists to unhide. */
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
++	/*
++	 * Neither board has IOStorageFamily: without the IOMedia class no
++	 * media exists to unhide.
++	 */
+ 	if (!iomediaClass) {
+ 		wasHiding = false;
+ 	}
+@@ -5188,10 +5191,10 @@ IOService::setRootMedia(IOService * root)
+ 	bool unhide;
+ 
+ 	ioblockstoragedriverClass = OSMetaClass::getMetaClassWithName(gIOBlockStorageDriverKey);
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 	/*
+-	 * SWEET has no IOStorageFamily, so no service can be a block storage
+-	 * driver: the root (e.g. a RAM disk) is not block media, as for image boot.
++	 * Neither board has IOStorageFamily, so no service can be a block
++	 * storage driver: the root is not block media, as for image boot.
+ 	 */
+ 	if (!ioblockstoragedriverClass) {
+ 		root = NULL;
