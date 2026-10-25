@@ -1502,8 +1502,8 @@ confirmed, and it is why the header ships in this patch instead of a follow-up.
 
 Checked: four gates + three `#endif` comments + one tab-indented header gate, one
 occurrence each (7 rewritten lines), CR=0 in all four sources and the patch,
-0086-0102 applying clean in order (17/17). Inventory: 11 sites in 11 files ->
-**7 in 7**, negated class still 0. Link and boot unverified; CI in the morning.
+0086-0103 applying clean in order (18/18). Inventory: 11 sites in 11 files ->
+**5 in 5**, negated class still 0. Link and boot unverified; CI in the morning.
 
 ### >>> 2026-10-25: 0102, Foundation atomic writes and the HFS swap they need <<<
 
@@ -1520,14 +1520,22 @@ the call resolves at link.
 Verified: 1 gate + 1 comment (`SWEET:` -> `HFS:`), sequential apply 17/17 clean;
 CR=0; inventory 8 -> **7**; negated class 0.
 
-### The remaining 7 sites, classified
+### >>> 2026-10-25: 0103, the network trace (route + address) <<<
+
+`bsd/net/rtsock.c:513` and `bsd/netinet/in.c:1213`: both `#if SWEET` gates
+widened. Rate-capped tracers (`SWEET NET:` prefix preserved per interface
+contract); routes (add/delete/change, source/gateway/flags, 200 cap) and IPv4
+addresses (SIOCAIFADDR / SIOCDIFADDR, interface, 100 cap). Both use
+`proc_selfname`. No new dependency; vendor source present (`0026-stage-hfs.sh`).
+Sequential apply 18/18 clean.
+
+### The remaining 5 sites, classified
 
 Not all of them are the same kind of work, and only one of them must not be
 touched at all:
 
 | site(s) | kind | note |
 | --- | --- | --- |
-| `bsd/net/rtsock.c`, `bsd/netinet/in.c` | mechanical | |
 | `pexpert/arm/pe_fiq.c:109` | mechanical, free | `virtual-timer-intid` is absent from the unit's DT and both boards default to 19 |
 | `iokit/Kernel/arm/SweetBattery.cpp` | **blocked** | needs `bsd/dev/sweet_spmi.c` widened first (it calls `sweet_spmi_init`/`sweet_spmi_read`), and SPMI is real per-board work: milanf's arbiter is at 0x1c40000 with PM6125 + PMR735A + PMK8350 |
 | `bsd/dev/sweet_rpmh.c`, `bsd/dev/sweet_spmi.c` | real per-board work | the two hardware drivers |
