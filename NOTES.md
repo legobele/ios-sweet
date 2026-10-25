@@ -1153,7 +1153,66 @@ Verified: fresh `ci-art3`, 0086-0097 one at a time in order, every one exit 0,
 CR=0 in all four sources and in the patch. Inventory: 18 sites in 17 files ->
 **15 in 14**. Link unverified; CI in the morning.
 
-### The remaining 15 sites, classified
+### >>> 2026-10-25: 0098, the reporter gets a caller <<<
+
+0087 widened the console crash reporter in `osfmk/kern/exception.c` for a
+mechanical reason: `bsd/conf/files` lists `bsd/dev/sweet_sample.c` as `standard`,
+so it compiles on every board, and it calls `sweet_sample_task()`, which lives in
+that reporter. The MILANF link died on exactly one symbol, `_sweet_sample_task`.
+
+That patch did the minimum and said so, in its own preamble:
+
+> The caller in `bsd/kern/kern_exit.c` carries its own guard and stays as it is.
+
+Which means that on milanf the kernel links a full crash reporter - user
+registers, frame-pointer backtrace, shared-cache slide, Mach-O header, heap
+strings - and then never calls it. Every userspace crash would go unrecorded
+while the code to record it sat in the image, and nothing about that shows up in
+a build log. It is the same shape as 0097's display size: two facts that are each
+true and contradict each other, visible only side by side.
+
+The caller is `proc_prepareexit`, and the block is small:
+
+```c
+if (p == current_proc()) {
+        extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
+        sweet_crash_log(p->p_comm, proc_getpid(p), WTERMSIG(rv),
+            ((uint64_t)ut->uu_exception << 32) | (uint32_t)ut->uu_code,
+            ut->uu_subcode);
+        /* abort_with_payload messages (_objc_fatal, os_crash_fmt, ...) */
+        if (PROC_HAS_EXITREASON(p)) { ... printf("CRASH %s reason ns ..."); }
+}
+```
+
+Two properties are what make this safe to switch on for a board that is still
+bringing up:
+
+*The `p == current_proc()` test is the filter.* It fires only when a process is
+terminating *itself* - an actual crash - not when something else signals it. So
+jetsam kills, `launchd`'s SIGKILL and the boot-time cleanup of failed jobs stay
+out of the log, and what lands there is a crash that needed debugging anyway. On
+a board with one console ring that is the difference between a signal and noise.
+
+*It costs nothing when nothing crashes.* The whole block is inside the exit path
+of the exiting process - no hook, no timer, no per-syscall work.
+
+And it is deliberately complementary to 0096 rather than redundant with it:
+`sweetiolog` says *which IOKit service a live daemon asked for right before it
+gave up*; this says *where a dead one was when it died*. Neither is a debugger,
+both are transcripts, and on a device with no serial port and no way to get logs
+off it, transcripts are the whole toolkit.
+
+Nothing in the block is board-specific - `PROC_HAS_EXITREASON`,
+`exit_reason_get_string_desc`, `WTERMSIG`, `proc_getpid` are generic kernel code
+and `sweet_crash_log` has been compiled on milanf since 0087. Its `printf` lands
+in the console ring 0089 added, which on milanf is the only place it could land.
+
+Verified: fresh `ci-tail` (= `ci-art3` + 0086..0097), one gate replaced with the
+count asserted at 1, CR=0 in source and patch, 0086-0098 sequential apply clean
+(13/13). Inventory: 15 sites in 14 files -> **14 in 13**. Link unverified; CI in
+the morning.
+
+### The remaining 14 sites, classified
 
 Not all of them are the same kind of work, and only one of them must not be
 touched at all:
@@ -1161,7 +1220,6 @@ touched at all:
 | site(s) | kind | note |
 | --- | --- | --- |
 | `bsd/dev/mem.c` x2 | **tracer, same class as 0096** | this is `sweetnull`: writes to `/dev/null` from the processes named in boot-arg `sweetnull` go to the console as `\|name\| text`. Daemons started by launchd get stdout/stderr on `/dev/null`, and pointing a job at `/dev/console` stops it launching at all - so this is the only way to see what a daemon printed before it died. Arguably more valuable on milanf than `sweetiolog`. |
-| `bsd/kern/kern_exit.c` | mechanical | needs a read of the site before widening |
 | `bsd/net/rtsock.c`, `bsd/netinet/in.c` | mechanical | |
 | `bsd/pthread/*` x3 | mechanical, as a unit | `bsd/sys/pthread_internal.h` declares what the three .c files define - it did not appear in this inventory pass, so re-check it when the trio is widened |
 | `bsd/vfs/kpi_vfs.c` | mechanical | |
