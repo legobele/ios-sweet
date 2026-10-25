@@ -5,13 +5,12 @@
 # This script REFUSES to build until, in order:
 #   1. shim/milanf-config.h has no UNKNOWN entries left, and the use
 #      sites (console.h, shim.c, ufs.c) have been pointed at it;
-#   2. MILANF_DTB points at the DTB extracted from THIS unit's stock
-#      boot image (recon pack step 1 -> tools/unpack_bootv2.py);
-#   3. the mkbootimg header variables below have been verified
-#      against that stock boot image's header (unpack_bootv2.py
-#      prints them) and MILANF_HEADER_VERIFIED=1 is set.
-# Sweet's header values in build.sh came from sweet's stock image;
-# they do NOT automatically transfer to Motorola's ABL.
+#   2. MILANF_REF_BOOT points at a boot image dumped from THIS unit, and
+#      tools/bootinfo.py can read its header. The build then matches that
+#      image's header version and os_version instead of assuming sweet's.
+# Sweet's header values in build.sh are v2 with explicit load addresses;
+# milanf is v3, which has none of that, so those numbers do not transfer
+# and would not even be meaningful here.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -23,28 +22,38 @@ if grep -q 'STATUS: UNKNOWN' milanf-config.h; then
 	exit 1
 fi
 
-# --- Gate 2: the unit's own stock DTB ------------------------------------
-: "${MILANF_DTB:?set MILANF_DTB to the DTB unpacked from the milanf stock boot image}"
-[ -f "$MILANF_DTB" ] || { echo "error: MILANF_DTB=$MILANF_DTB not found" >&2; exit 1; }
-
-# --- Gate 3: stock boot-image header values ------------------------------
-# UNKNOWN until read off the unit's stock boot.img with
-# tools/unpack_bootv2.py. Fill from THAT output, then set
-# MILANF_HEADER_VERIFIED=1.
-KERNEL_OFFSET="${MILANF_KERNEL_OFFSET:-}"
-RAMDISK_OFFSET="${MILANF_RAMDISK_OFFSET:-}"
-TAGS_OFFSET="${MILANF_TAGS_OFFSET:-}"
-DTB_OFFSET="${MILANF_DTB_OFFSET:-}"
-PAGESIZE="${MILANF_PAGESIZE:-}"
-if [ "${MILANF_HEADER_VERIFIED:-0}" != "1" ] || [ -z "$KERNEL_OFFSET" ] || \
-   [ -z "$RAMDISK_OFFSET" ] || [ -z "$TAGS_OFFSET" ] || [ -z "$DTB_OFFSET" ] || \
-   [ -z "$PAGESIZE" ]; then
-	echo "error: mkbootimg header values not verified against the milanf stock boot image." >&2
-	echo "Run tools/unpack_bootv2.py on the stock boot.img, export the" >&2
-	echo "MILANF_*_OFFSET / MILANF_PAGESIZE values it reports, then set" >&2
-	echo "MILANF_HEADER_VERIFIED=1." >&2
+# --- Gate 2: reference boot image from this unit -------------------------
+# milanf boots header v3 (read off both slots: header_size 1580,
+# header_version 3, os_version 16.0.0 / patch 2026-08). v3 has no page
+# size, no load addresses, no second stage and no dtb section at all, so
+# the offset variables this script used to demand do not exist on this
+# device. Two consequences worth stating, because both used to be gates:
+#
+#   - the DTB cannot ride in boot.img on v3. It does not need to: ABL
+#     hands the merged FDT to the kernel in x0 (shim/start.S: mov x19, x0)
+#     and fdt.c only reads /chosen from it, while the ADT the shim boots
+#     travels inside the payload (tools/mkpayload.py KERNEL ADT OUT).
+#   - mkbootimg needs the header version and the os_version/os_patch_level
+#     pair, not offsets, and those are read off the unit rather than
+#     hardcoded here.
+#
+# What is still refused: an image that is not v3, because that means the
+# reference is not a boot image this device would accept.
+: "${MILANF_REF_BOOT:?set MILANF_REF_BOOT to a boot.img dumped from this unit: adb exec-out dd if=/dev/block/by-name/boot_b status=none > boot_b.img}"
+[ -f "$MILANF_REF_BOOT" ] || { echo "error: MILANF_REF_BOOT=$MILANF_REF_BOOT not found" >&2; exit 1; }
+PYTHON="${PYTHON:-python3}"
+BOOTVARS=$("$PYTHON" ../tools/bootinfo.py --emit-sh "$MILANF_REF_BOOT") || {
+	echo "error: $MILANF_REF_BOOT does not parse as an Android boot image" >&2
+	exit 1
+}
+eval "$BOOTVARS"
+if [ "$BOOT_HEADER_VERSION" != "3" ]; then
+	echo "error: $MILANF_REF_BOOT is header v$BOOT_HEADER_VERSION, but this device boots v3." >&2
+	echo "Point MILANF_REF_BOOT at a boot image dumped from the unit itself." >&2
 	exit 1
 fi
+echo "reference: header v$BOOT_HEADER_VERSION, os $BOOT_OS_VERSION patch $BOOT_OS_PATCH_LEVEL," \
+	"kernel $BOOT_KERNEL_SIZE bytes, ramdisk $BOOT_RAMDISK_SIZE bytes"
 
 # --- Build (mirrors build.sh) ---------------------------------------------
 CC=aarch64-linux-gnu-gcc
@@ -68,10 +77,9 @@ if [ -n "${1:-}" ]; then
 else
 	(cd out && rm -rf rd && mkdir rd && cd rd && find . | cpio -o -H newc --quiet | gzip -9 > ../ramdisk.bin)
 fi
-mkbootimg --header_version 2 --kernel out/Image --ramdisk out/ramdisk.bin \
-	--dtb "$MILANF_DTB" --base 0 --kernel_offset "$KERNEL_OFFSET" --ramdisk_offset "$RAMDISK_OFFSET" \
-	--tags_offset "$TAGS_OFFSET" --dtb_offset "$DTB_OFFSET" --pagesize "$PAGESIZE" \
-	--os_version 17.0.0 --os_patch_level 2035-06 \
+mkbootimg --header_version "$BOOT_HEADER_VERSION" \
+	--kernel out/Image --ramdisk out/ramdisk.bin \
+	--os_version "$BOOT_OS_VERSION" --os_patch_level "$BOOT_OS_PATCH_LEVEL" \
 	--cmdline "console=null" -o out/shim-boot-milanf.img
 gcc -O1 -Wall -DMILANF=1 -o out/host_test console.c host_test.c && ./out/host_test
 ls -l out/Image out/shim-boot-milanf.img

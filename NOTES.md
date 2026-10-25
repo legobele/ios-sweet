@@ -419,6 +419,56 @@ two touched files, both "Applied patch ... cleanly", resulting files CR=0 and
 diffing exactly as generated. 0086 and 0087 touch neither file, so ordering is
 not a concern. Patch is committed locally only.
 
+### >>> 2026-10-25: milanf boots header v3, so gates 2 and 3 were unanswerable <<<
+
+Dumped `boot_a` and `boot_b` off the unit (read-only `adb exec-out dd`, nothing
+written to the device; the dumps stay in the temp dir, not in git). Both are
+**Android boot header v3**:
+
+- `header_version` 3, `header_size` 1580, `cmdline` empty
+- `os_version` decodes as **16.0.0, security patch 2026-08**
+- kernel 39,328,256 bytes at `0x1000`, starting `MZ` with `ARMd` at `0x38` -
+  an uncompressed arm64 Linux Image, as `start.S` expects
+- ramdisk 19.4 MB, LZ4-framed, at `0x2583000`
+
+Both slots carry the same kernel size and the same `os_version`, so both were
+written by the same tooling. Worth writing down: `os_version` 16.0.0 / 2026-08
+on a device whose vendor build is `T2SDS33.75-38-1-3-26` (Android 13) means
+neither slot holds the stock Android 13 boot image. That is consistent with
+`adb root` working on a `user` build. No conclusion drawn beyond that.
+
+**Why this broke the gates.** v3 has no page size, no kernel/ramdisk/tags/dtb
+load addresses, no second stage and no dtb section - it dropped all of it.
+Gate 3 demanded exactly those five values, so it was not "not yet run", it was
+unsatisfiable. Gate 2's premise ("the DTB extracted from the stock boot image")
+is also false on this device: the DTB lives in the dtbo partition, ABL merges
+it and passes it in x0 (`shim/start.S: mov x19, x0`), and `fdt.c` only reads
+`/chosen` out of it. The ADT does not ride there either - it goes inside the
+payload (`tools/mkpayload.py KERNEL ADT OUT`). So `--dtb` was never needed.
+
+**`tools/unpack_bootv2.py` would have misparsed it silently**, which is the
+interesting failure: the script reads `ramdisk_size` at offset 16, and on v3
+offset 16 is `os_version`, so a v3 image reports a 536,871,336-byte ramdisk
+instead of 19,451,270. It would have "worked" and printed nonsense. New
+`tools/bootinfo.py` picks the layout from `header_version` and refuses
+unknown versions: v0-v2 read the page size and addresses, v3/v4 use
+4096-aligned sections, v4 skips its 4096-byte signature. Checked against both
+real dumps and against synthetic v0, v2 and v4 images.
+
+`shim/build-milanf.sh` gate 2 is now: `MILANF_REF_BOOT` must point at an image
+dumped from this unit, `bootinfo.py --emit-sh` reads it, and anything that is
+not header v3 is refused (that would mean the reference is not an image this
+device would accept). `mkbootimg` gets `--header_version 3` and the reference's
+`os_version`/`os_patch_level`, with no `--dtb`, `--base`, offset or `--pagesize`
+arguments. Verified: `bash -n` clean; running the script with a reference image
+passes gates 1 and 2 and stops only at the missing `aarch64-linux-gnu-gcc`;
+running it with no `MILANF_REF_BOOT` refuses at gate 2 with the dump command in
+the message.
+
+Still unexercised: `mkbootimg` itself, and therefore the actual v3 image this
+produces. There is no cross toolchain on this machine, so the shim has still
+only been read through by hand. That is the first thing to run on the MacBook.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

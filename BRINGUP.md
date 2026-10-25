@@ -12,9 +12,12 @@ Companion artifacts from this desk pass:
   config, sibling of upstream's 0004 SWEET config.
 - `tools/mkadt-milanf.py` — the MILANF ADT builder, sibling of
   `tools/mkadt.py`, with a hard gate against unresolved values.
-- `shim/milanf-config.h` — the shim-side hardware value ledger.
-- `shim/build-milanf.sh` — the shim build, gated on resolved values +
-  the unit's own stock DTB + verified boot-image header values.
+- `shim/milanf-config.h` - the shim-side hardware value ledger.
+- `tools/bootinfo.py` - boot image header reader, v0 through v4. milanf's
+  images are v3, which `tools/unpack_bootv2.py` would silently misparse.
+- `shim/build-milanf.sh` - the shim build, gated on resolved values + a
+  boot image dumped from the unit (`MILANF_REF_BOOT`, read by
+  `tools/bootinfo.py`).
 - `../recon/` — the read-only device recon pack (runs on the Windows
   laptop; produces the DTB dump everything below consumes).
 
@@ -109,13 +112,14 @@ flashing).
    memory banks, reserved-memory list, ufshc reg, and GIC reg
    cross-check that feed `tools/mkadt-milanf.py` and
    `shim/milanf-config.h`.
-3. Extract the stock DTB from the stock boot image: the recon run's
-   fingerprint keys the matching stock firmware package (see
-   `../recon/README.md`, firmware fallback) **or** the boot image is
-   pulled from the device in recovery; either way:
-   `tools/unpack_bootv2.py <boot.img> dtb/boot_unpacked` — gives the
-   DTB file for `build-milanf.sh` (`MILANF_DTB`) and the stock header
-   values for its gate 3.
+3. Dump the boot image from the unit and read its header:
+   `adb exec-out dd if=/dev/block/by-name/boot_b status=none > boot_b.img`
+   then `tools/bootinfo.py boot_b.img`. That image is **header v3**
+   (`header_size` 1580, `os_version` 16.0.0 / patch 2026-08), so there is
+   no DTB inside it and no load addresses to copy - v3 dropped all of that.
+   `build-milanf.sh` takes the header version and `os_version` from it via
+   `MILANF_REF_BOOT`. The device tree a kernel sees comes from the dtbo
+   partition, which ABL merges and passes in x0.
 4. Partition backups (SPEC §3 restore set): temp-boot a recovery
    image (**`fastboot boot`, never flash**; which recovery supports
    milanf is itself confirmed here), then `dd` out: boot (both
@@ -319,10 +323,12 @@ kernel board header (patch 0082):
 |---|---|---|
 | CITED (mainline sm6375.dtsi) | 11 | GICD base+size, GICR base+size, GICR redistributor stride, VTIMER INTID 19, TIMEBASE 19.2 MHz, CPU count/topology (6+2, reg=Aff1), kryo660 compatible, little-cluster max clock, big-cluster max clock, DRAM base 0x80000000 |
 | Architectural / fork choice | 6 | cache cline 6 (A78/A55), MAX_CPUS 8, IPI SGI 1, SOC_BASE, PANIC_LOG_SIZE, synthetic ECID |
-| UNKNOWN — pending unit DTB | 12 | PHYS_BASE, MEM_SIZE, HIGH_PHYS_BASE, HIGH_MEM_SIZE, FB base, FB size, FB width, FB height, FB stride, UFS base+size, IMEM restart-reason, PSHOLD |
-| UNKNOWN — pending stock boot image | 1 (group) | mkbootimg header offsets + page size for `build-milanf.sh` gate 3 |
+| RESOLVED - unit DTB | 11 | PHYS_BASE, MEM_SIZE, HIGH_PHYS_BASE, HIGH_MEM_SIZE, FB base, FB size, FB width, FB height, FB stride, UFS base+size, IMEM restart-reason |
+| DELIBERATELY ABSENT - unit DTB | 1 | PSHOLD: the DTB has no `pshold` node at all, and `reset()` issues PSCI `SYSTEM_RESET` first, so the fallback write is compiled out behind `HAVE_PSHOLD` rather than given an invented address |
+| RESOLVED - unit boot image | 1 (group) | the image is header v3, which has no load addresses or page size at all (`tools/bootinfo.py`); the group turned out not to exist |
 
-So of the values that describe *this hardware*, 12 of 23 (52%) wait
-on the unit's DTB and one group waits on its stock boot image; the
-rest are mainline-cited or architectural. Every UNKNOWN names its
-resolution source in the file where it sits.
+All twelve hardware values now come from the unit itself - its DTB,
+cross-checked against the running kernel's `/proc/iomem` - and the
+boot-image "group" resolved to "there is nothing to fill in". Sources are
+recorded where the values sit, and both `tools/mkadt-milanf.py` and
+`shim/build-milanf.sh` still refuse to proceed if one goes missing again.
