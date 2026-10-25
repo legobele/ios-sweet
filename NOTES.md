@@ -363,6 +363,62 @@ morning.
    `SweetPlatformExpert.cpp` (boot-critical), then the `SweetFramebuffer`
    handoff to the real panel geometry.
 
+### >>> 2026-10-25: 0088, the platform expert, and the table nobody looks at <<<
+
+**All nine `Sweet*` drivers compile to empty translation units on MILANF.**
+That is why the link came back clean - nothing is missing, everything is
+absent. `iokit/conf/files.arm64:10-19` lists each one `optional iokitcpp` (so
+every board compiles the file), and each file is wrapped in `#if
+defined(SWEET)` or `#if defined(ARM64_BOARD_CONFIG_SWEET)` at its top.
+
+**The trap is `iokit/KernelConfigTables.cpp`.** Its whole personality table is
+inside `#if defined(ARM64_BOARD_CONFIG_SWEET)` (L37-85), so MILANF's
+`gIOKernelConfigTables` today is only the shared `IOPanicPlatform` entry that
+sits outside the guard (L86-90). A driver with no personality pointing at it is
+never instantiated, and `IOService::serviceMatching("IOPlatformExpert")`
+(L1038 in `IOKitBSDInit.cpp`) would simply find nothing. So widening the
+driver guard alone would have produced a compiled platform expert that never
+ran - both halves are required, which is why 0088 carries both.
+
+Per-driver constants, so the next seven patches are not guesswork:
+
+| driver | board-specific content |
+| --- | --- |
+| `SweetPlatformExpert` | none - only the guard and the log prefix |
+| `SweetCPU` | none but the match string: `qcom,kryo470` in the table vs `qcom,kryo660` in milanf's DTB. Its only SoC constant is PSCI `CPU_ON` = `0xC4000003` |
+| `SweetFramebuffer` | real: `1080x2400` in the geometry comments and its own base |
+| `SweetBattery` | real: SPMI reads at `0x4804`, `0x4808`, `0x48c0`, `0x1310`, `0x110b` - check against the PM6125 milanf's DTB declares |
+| `SweetEntitlements`, `SweetKeyStore`, `SweetSurface`, `SweetWatchdog`, `SweetHID` | no hex constants at all |
+
+**`qcom,kryo470` vs `qcom,kryo660`** is worth its own line because it looks
+like a bug and is not: the milanf ADT root compatible list is
+`D22AP | iPhone10,3 | motorola,milanf | qcom,sm6375 | xiaomi,sweet | AppleARM`
+- deliberately impersonating a sweet so the PE's `IONameMatch` works - but the
+CPU nodes underneath are `qcom,kryo660|ARM,v8`. That is a match-string
+difference, not a code difference, so `SweetCPU` gets a second personality when
+it comes back rather than a rewrite.
+
+**0088 (`xnu/patches/0088-milanf-platform-expert.patch`)** therefore does two
+things and nothing else: widens the PE guard to `defined(SWEET) ||
+defined(MILANF)`, and adds a `#elif defined(ARM64_BOARD_CONFIG_MILANF)` arm to
+the config table containing exactly one personality - the PE, field-for-field
+identical to sweet's. Deliberately *not* widened wholesale: naming
+`SweetCPU`, `SweetHIDButtons`, `SweetHIDTouch`, `SweetBattery`, `AppleCLCD`,
+`AppleKeyStore`, `IOWatchdog` or `IOCoreSurfaceRoot` before their classes
+exist just earns an IOKit "can't find class" line at boot. They return one
+driver at a time, each with its values checked and its own personality entry.
+
+The `IOLog` strings keep the `SWEET:` prefix on purpose:
+`research/check-platform.gdb` matches "platform expert registered" in the QEMU
+platform test, and renaming output for cosmetics is not worth re-validating
+that. The two prose comments do get made board-neutral.
+
+Verification done without a compiler: `git apply --check` exit 0 alone and with
+0086+0087 in series order, then a real apply to a scratch tree holding just the
+two touched files, both "Applied patch ... cleanly", resulting files CR=0 and
+diffing exactly as generated. 0086 and 0087 touch neither file, so ordering is
+not a concern. Patch is committed locally only.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

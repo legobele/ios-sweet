@@ -1,0 +1,107 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: give milanf the platform expert, and a table to find it in
+
+iokit/conf/files.arm64 lists all nine Sweet* drivers as 'optional iokitcpp',
+so they compile on every board, and each one is wrapped in
+
+  #if defined(SWEET)      (or ARM64_BOARD_CONFIG_SWEET)
+
+which on milanf makes nine empty translation units. That is why the milanf
+kernel links: nothing is missing, everything is absent.
+
+Fixing only the driver would not have been enough, and this is the part
+worth reading twice. iokit/KernelConfigTables.cpp wraps the whole
+personality table in the same ARM64_BOARD_CONFIG_SWEET guard, so milanf's
+gIOKernelConfigTables is currently just the shared IOPanicPlatform entry.
+A platform expert with no personality pointing at it is never instantiated,
+so the kernel would have gone looking for an IOPlatformExpert and found
+none. Both halves are needed, which is why they are one patch.
+
+The table is not widened wholesale, it gets a milanf arm of its own with
+exactly one personality. Widening it would name SweetCPU, SweetHIDButtons,
+SweetHIDTouch, SweetBattery, AppleCLCD, AppleKeyStore, IOWatchdog and
+IOCoreSurfaceRoot, none of which exist yet on this board, and each would
+earn an IOKit "can't find class" at boot. They come back one driver at a
+time, each with its board values checked and its own personality here.
+
+SweetFramebuffer will be the awkward one: it carries 1080x2400 in its
+geometry and needs milanf's 1080x2460 plus its own base. SweetBattery's
+SPMI register addresses need checking against the PM6125 the milanf DTB
+declares. SweetCPU is closer than it looks but will need a second
+personality, because the milanf ADT names its cores qcom,kryo660 while the
+table matches qcom,kryo470 - that is a match-string difference, not a code
+difference, since its only SoC constant is PSCI CPU_ON (0xC4000003).
+
+The IOLog strings keep their 'SWEET:' prefix on purpose - research/
+check-platform.gdb matches 'platform expert registered' in the QEMU
+platform test, and renaming output for cosmetics is not worth
+re-validating that. The header comment and the processTopLevel comment are
+prose, so those are made board-neutral.
+
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -1,11 +1,12 @@
+ /*
+- * Minimal device-tree platform expert for Redmi Note 10 Pro (sweet).
++ * Minimal device-tree platform expert for the Qualcomm dev boards
++ * (sweet / SM7150, milanf / SM6375).
+  * Uses XNU's normal platform, power-domain and nub initialization. Hardware
+  * interrupt and power-management services are supplied by separate drivers.
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
+@@ -51,8 +52,9 @@
+ {
+ 	/*
+ 	 * The stock implementation requires an Apple NVRAM /options node.
+-	 * SWEET has no NVRAM controller; publish real CPU/device nodes without
+-	 * inventing one. createNubs adds the topology's logical CPU/cluster IDs.
++	 * Neither board has an NVRAM controller; publish real CPU/device nodes
++	 * without inventing one. createNubs adds the topology's logical
++	 * CPU/cluster IDs.
+ 	 */
+ 	IORegistryEntry *cpus = root->childFromPath("cpus", gIODTPlane);
+ 	if (cpus != NULL) {
+@@ -79,4 +81,4 @@
+  * "compatible" string and "model" (D22AP / iPhone10,3 in the ADT), which
+  * is what the iPhone userland (MobileGestalt) expects.
+  */
+-#endif /* SWEET */
++#endif /* SWEET || MILANF */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -82,6 +82,27 @@
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = SweetBattery;"
+     "   },"
++#elif defined(ARM64_BOARD_CONFIG_MILANF)
++    /*
++     * milanf gets the platform expert and nothing else, for now. Every
++     * other Sweet* driver is still an empty translation unit on this
++     * board, and a personality whose class does not exist only earns
++     * an IOKit "can't find class" line. They come back one at a time,
++     * each with its own board values and its own personality here.
++     *
++     * IONameMatch is "xiaomi,sweet" and that is deliberate, not a
++     * copy-paste slip: the milanf ADT root compatible list is
++     *   D22AP | iPhone10,3 | motorola,milanf | qcom,sm6375 |
++     *   xiaomi,sweet | AppleARM
++     * so the device impersonates a sweet for the userland's benefit
++     * and this match is what the ADT actually publishes.
++     */
++    "   {"
++    "     'IOClass'         = SweetPlatformExpert;"
++    "     'IOProviderClass' = IOPlatformExpertDevice;"
++    "     'IONameMatch'     = 'xiaomi,sweet';"
++    "     'IOProbeScore'    = 10000:32;"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"
