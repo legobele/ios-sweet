@@ -1375,10 +1375,12 @@ port the strings are the interface. `PE_parse_boot_argn`, `proc_selfname` and
 `printf` are all already compiled on milanf; nothing in the block reads a sweet
 address, clock or register.
 
-Verified: fresh `ci-tail` (= `ci-art3` + 0086..0099), both gates asserted at
+Verified: fresh `ci-tail` (= `ci-art3` + 0086..0101), both gates asserted at
 exactly 2 occurrences before replacing, header comment reworded board-neutrally,
 CR=0 in source and patch, 0086-0100 sequential apply clean (15/15). Inventory:
-13 sites in 12 files -> **11 in 11**, negated class still 0.
+13 sites in 12 files -> **11 in 11**, negated class 0. 0102 (VFS rename swap)
+verified separately: 1 gate rewritten, comment reworded; 0086-0102 sequential
+apply clean (17/17). Final inventory: **7 in 7**; negated class still 0.
 
 ### >>> 2026-10-25: 0101, and the first real boot-stopper <<<
 
@@ -1500,10 +1502,25 @@ confirmed, and it is why the header ships in this patch instead of a follow-up.
 
 Checked: four gates + three `#endif` comments + one tab-indented header gate, one
 occurrence each (7 rewritten lines), CR=0 in all four sources and the patch,
-0086-0101 applying clean in order (16/16). Inventory: 11 sites in 11 files ->
-**8 in 8**, negated class still 0. Link and boot unverified; CI in the morning.
+0086-0102 applying clean in order (17/17). Inventory: 11 sites in 11 files ->
+**7 in 7**, negated class still 0. Link and boot unverified; CI in the morning.
 
-### The remaining 8 sites, classified
+### >>> 2026-10-25: 0102, Foundation atomic writes and the HFS swap they need <<<
+
+`bsd/vfs/kpi_vfs.c:4462`: the RENAME_SWAP -> VNOP_EXCHANGE arm, one gate, zero
+board-specific logic inside. Foundation's atomic writes (usermanagerd preference
+updates) ask the VFS for `RENAME_SWAP`; HFS (staged by `0026-stage-hfs.sh`,
+`SWEET|MILANF`, source `hfs-627.100.6` at pinned commit `31d5ec2`) has no
+native `RENAME_SWAP`, so the arm catches `ENOTSUP` with `flags == VFS_RENAME_SWAP`
+and falls through to `VNOP_EXCHANGE(*fvpp, *tvpp, 0, ctx)`. Without the fallback,
+ENOTSUP propagates and the atomic swap fails. The staged source defines
+`hfs_vnop_exchange` (`core/hfs_vnops.c:7383`, vnop table entry `exchange`), so
+the call resolves at link.
+
+Verified: 1 gate + 1 comment (`SWEET:` -> `HFS:`), sequential apply 17/17 clean;
+CR=0; inventory 8 -> **7**; negated class 0.
+
+### The remaining 7 sites, classified
 
 Not all of them are the same kind of work, and only one of them must not be
 touched at all:
@@ -1511,7 +1528,6 @@ touched at all:
 | site(s) | kind | note |
 | --- | --- | --- |
 | `bsd/net/rtsock.c`, `bsd/netinet/in.c` | mechanical | |
-| `bsd/vfs/kpi_vfs.c` | mechanical | |
 | `pexpert/arm/pe_fiq.c:109` | mechanical, free | `virtual-timer-intid` is absent from the unit's DT and both boards default to 19 |
 | `iokit/Kernel/arm/SweetBattery.cpp` | **blocked** | needs `bsd/dev/sweet_spmi.c` widened first (it calls `sweet_spmi_init`/`sweet_spmi_read`), and SPMI is real per-board work: milanf's arbiter is at 0x1c40000 with PM6125 + PMR735A + PMK8350 |
 | `bsd/dev/sweet_rpmh.c`, `bsd/dev/sweet_spmi.c` | real per-board work | the two hardware drivers |

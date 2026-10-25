@@ -1,0 +1,73 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: network bring-up trace (route + address changes)
+
+Two mechanical gates, same shape as 0096 (`sweetiolog`): each is a single
+`#if defined(ARM64_BOARD_CONFIG_SWEET)` arm with a comment that says `SWEET:`
+and a `printf("SWEET NET: ...")` that reports network configuration changes
+made by user processes.
+
+`bsd/net/rtsock.c:513` tracks IPv4 route changes (`RTM_ADD` / `RTM_DELETE` /
+`RTM_CHANGE`) with source/gateway/interface/flags; `bsd/netinet/in.c:1213`
+tracks IPv4 address assignment/removal (`SIOCAIFADDR` / `SIOCDIFADDR`) with
+interface name. Both use `proc_selfname(pname, sizeof(pname))` so the process
+name survives without a cnode lock.
+
+Both are rate-capped - 200 lines for routes, 100 for addresses - and consume
+nothing past that, so they are cheap even on a live network. The prefix
+`"SWEET NET:"` is kept unchanged: the host-side log tooling greps it, exactly
+as 0096 and 0100 keep their interface strings (`sweetiolog`, `|name|`).
+
+Both files have the vendor source present: HFS via `0026-stage-hfs.sh` (`SWEET|MILANF`);
+nothing new is staged, nothing new is linked, nothing touches board hardware.
+Widening is the full surface area of the change.
+
+Verified: both gates asserted at 1 occurrence each, both comments and printf
+prefixes updated, sequential apply 0086-0103 clean (18/18), CR=0 in all sources
+and patch, inventory 7 -> **6**, negated class 0. Link and boot unverified;
+CI in the morning.
+
+diff --git a/bsd/net/rtsock.c b/bsd/net/rtsock.c
+index 992b9cb..2c7ce38 100644
+--- a/bsd/net/rtsock.c
++++ b/bsd/net/rtsock.c
+@@ -510,7 +510,7 @@ route_output(struct mbuf *m, struct socket *so)
+ 		SIN6(info.rti_info[RTAX_DST])->sin6_addr.s6_addr16[1] = 0;
+ 	}
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 	/* SWEET: which process changes IPv4 routes (network bring-up). */
+ 	if ((rtm->rtm_type == RTM_ADD || rtm->rtm_type == RTM_DELETE || rtm->rtm_type == RTM_CHANGE) &&
+ 	    info.rti_info[RTAX_DST] != NULL && info.rti_info[RTAX_DST]->sa_family == AF_INET) {
+@@ -522,7 +522,7 @@ route_output(struct mbuf *m, struct socket *so)
+ 			    (const uint8_t *)&SIN(info.rti_info[RTAX_GATEWAY])->sin_addr : NULL;
+ 			char pname[20];
+ 			proc_selfname(pname, sizeof(pname));
+-			printf("SWEET NET: %s route %s %u.%u.%u.%u gw %u.%u.%u.%u ifindex %u flags 0x%x\n", pname,
++			printf("SWEET NET: %s route %s %u.%u.%u.%u gw %u.%u.%u.%u ifindex %u flags 0x%x\n", pname,
+ 			    rtm->rtm_type == RTM_ADD ? "add" : rtm->rtm_type == RTM_DELETE ? "delete" : "change",
+ 			    d[0], d[1], d[2], d[3], g ? g[0] : 0, g ? g[1] : 0, g ? g[2] : 0, g ? g[3] : 0,
+ 			    rtm->rtm_index, rtm->rtm_flags);
+diff --git a/bsd/netinet/in.c b/bsd/netinet/in.c
+index 6f7238c..5a848b3 100644
+--- a/bsd/netinet/in.c
++++ b/bsd/netinet/in.c
+@@ -1210,7 +1210,7 @@ in_control(struct socket *so, u_long cmd, caddr_t data, struct ifnet *ifp,
+ 	/* In case it's NULL, make sure it came from the kernel */
+ 	VERIFY(so != NULL || p == kernproc);
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 	/* SWEET: which process sets IPv4 addresses on which interface. */
+ 	if ((cmd == SIOCAIFADDR || cmd == SIOCDIFADDR) && ifp != NULL) {
+ 		static int sweet_in_logged;
+@@ -1218,7 +1218,7 @@ in_control(struct socket *so, u_long cmd, caddr_t data, struct ifnet *ifp,
+ 			const uint8_t *a = (const uint8_t *)&((struct in_aliasreq *)(void *)data)->ifra_addr.sin_addr;
+ 			char pname[20];
+ 			proc_name(proc_pid(p), pname, sizeof(pname));
+-			printf("SWEET NET: %s %s %s %u.%u.%u.%u\n", pname, if_name(ifp),
++			printf("SWEET NET: %s %s %s %u.%u.%u.%u\n", pname, if_name(ifp),
+ 			    cmd == SIOCAIFADDR ? "add address" : "delete address", a[0], a[1], a[2], a[3]);
+ 		}
+ 	}
+
