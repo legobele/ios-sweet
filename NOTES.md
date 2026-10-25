@@ -469,6 +469,80 @@ Still unexercised: `mkbootimg` itself, and therefore the actual v3 image this
 produces. There is no cross toolchain on this machine, so the shim has still
 only been read through by hand. That is the first thing to run on the MacBook.
 
+### >>> 2026-10-25: 0089, a block device at last, and the full guard inventory <<<
+
+0088 gave milanf a platform expert. This one gives it a disk. The finding that
+made it obvious: `bsd/conf/files:107` lists `bsd/dev/sweet_ufs.c` as
+`standard`, so it compiles on every board, but its entire body sits inside
+`#if defined(ARM64_BOARD_CONFIG_SWEET)` (L21-823). Milanf has been getting a
+824-line empty translation unit. No UFS, no GPT scan, no disk, nothing for
+`rd=ufsroot0` to resolve.
+
+It goes first because it is the one driver with **zero hardcoded addresses**.
+It looks up `/sweet-ufs` in the ADT and drives whatever base it finds; the
+milanf ADT already publishes that node at `0x04804000`, the `ufshc` block from
+the unit's own device tree. Everything else in the file is UFSHCI 2.1 register
+offsets and SCSI command construction - identical on any Qualcomm UFS host.
+Compare the rest: `sweet_spmi.c` 3 addresses, `sweet_rpmh.c` 3,
+`sweet_usb.c` 3, `sweet_touch.c` 3, and **none of them survive the jump to
+this SoC** (`tools/fdt-find.py` puts `0x00a84000` inside `qcom,blair-pinctrl`
+and finds no node at all for the DWC3 base or any of the RPMh/SPMI bases).
+
+**Three symbols live in sweet_ufs.c but are called from outside its guard**,
+which is why this patch is six files and not one:
+
+| caller | symbol | why it comes along |
+| --- | --- | --- |
+| `iokit/bsddev/IOKitBSDInit.cpp:769` | `sweet_ufs_rootdev` | the `rd=ufsroot0` branch; without it the driver compiles and is unreachable |
+| `osfmk/console/serial_console.c:269,284` | `sweet_log_append` | the 4 MB persistent console ring that `tools/sweet-log-pull.sh` reads back; on a board with no serial port it is the only post-mortem there is |
+| `bsd/dev/sweet_ufs.c:660-662` | `sweet_keys_init`, `sweet_touch_init`, `sweet_usb_probe` | called unconditionally by `sweet_ufs_init` |
+
+`sweet_log_append` is a bare ring-buffer write - no hardware, no lock, no
+early-out to get wrong - so it is safe from `_cnputs` before UFS has
+initialised, which covers every line printed during early boot.
+
+The last row is the one that needed a decision. Those three drivers are **not**
+being enabled; their addresses do not exist here. Rather than wrap the calls
+in `sweet_ufs.c` with board conditionals (which would have to be edited again
+every time one of them comes online), each file gets an `#elif
+defined(ARM64_BOARD_CONFIG_MILANF)` arm supplying an empty entry point. The
+boot sequence stays a plain sequence, and each driver states its own board
+status in its own file. Before doing that, every top-level definition in all
+three files was checked for external references: the **only** symbol any other
+file names is that init entry point, so the stub is exactly the required link
+surface and nothing else is left dangling.
+
+**The guard inventory, which is the real deliverable here.** 106 sites across
+70 files reference the board config. 29 are already widened by 0084
+(`defined(SWEET) || defined(MILANF)`), 5 are closed by 0086-0089, and **77 were
+untouched**, which is the remaining worklist:
+
+| group | sites | what it is |
+| --- | --- | --- |
+| `libkern/crypto/*` | 18 | BearSSL-backed AES/MD5/SHA1/SHA2 shims and their corecrypto hooks |
+| `iokit/Kernel/IOUserClient.cpp` | 7 | port hooks, the largest single file in the list |
+| `iokit/Kernel/arm/Sweet*` | 9 | the driver set, each needs its own values |
+| `bsd/kern` (`bsd_init`, `kern_exec`, `kern_exit`, `kern_core`, `kern_mib`) | 7 | port tweaks; `bsd_init.c:700` is the `SWEET_HFS` root path |
+| `iokit/Kernel/IOService.cpp` | 3 | 2 of them are the `!defined(...)` stock-Apple side |
+| `bsd/pthread/*` + `pthread_internal.h` | 4 | the built-in pthread port |
+| `bsd/dev` (`mem.c`, the remaining sweet_* drivers, `sweet_amfi.c`) | 10 | `/dev/mem`, SPMI/RPMh/touch/usb/keys, AMFI |
+| `osfmk` (`arm_vm_init`, `debug`, `proc_reg`, `sweet_early`) | 6 | `proc_reg.h:216` has a `#elif defined(SWEET)` CPU-table arm with no milanf sibling |
+| `bsd/net` (`rtsock`, `in`) + `bsd/vm/vm_unix` + `kpi_vfs` | 4 | networking/memory port tweaks |
+| `libkern/crypto` misc singletons | 9 | the individual `sweet_*` 5-line shims |
+
+The 18 crypto sites are why this matters beyond "nice to have": the port
+replaced Apple's closed corecrypto with BearSSL shims, and on milanf every one
+of those shims is compiled out. The kernel links because nothing else in the
+MILANF config references them - but anything that needs AES or a SHA at
+runtime has no implementation. Worth checking against what launchd actually
+asks for before deciding how much of it to bring back.
+
+Verification for 0089: `git apply --check` exit 0 alone, and exit 0 in series
+order behind 0086+0087+0088 (none of those touch these six files), then a real
+apply to a scratch tree - all six "Applied patch ... cleanly", CR=0 in the
+sources and in the patch. The link is unverified; that needs a push and a CI
+run in the morning.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
