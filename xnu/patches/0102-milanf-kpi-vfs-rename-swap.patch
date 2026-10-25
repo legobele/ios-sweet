@@ -1,0 +1,65 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: Foundation atomic writes swap through HFS exchangedata
+
+Foundation's atomic-write path (used by usermanagerd, among others) asks the
+VFS layer for `RENAME_SWAP`: swap two paths on one volume so each name ends up
+with the other file's data and attributes, atomically. HFS has no native
+RENAME_SWAP, so `kpi_vfs.c` catches `VNOP_RENAMEX` returning `ENOTSUP` with
+`flags == VFS_RENAME_SWAP` and falls through to `VNOP_EXCHANGE` instead:
+
+```c
+if (_err == ENOTSUP && flags == VFS_RENAME_SWAP && *tvpp != NULLVP &&
+    vnode_isreg(*fvpp) && vnode_isreg(*tvpp) &&
+    vnode_mount(*fvpp) == vnode_mount(*tvpp)) {
+    _err = VNOP_EXCHANGE(*fvpp, *tvpp, 0, ctx);
+}
+```
+
+That whole arm is wrapped in `#if defined(ARM64_BOARD_CONFIG_SWEET)`, so on
+milanf Foundation's atomic writes hit `ENOTSUP` and fail with
+"Failed to atomically swap writing file: Operation not supported" - usermanagerd
+logs it every time it tries to atomically replace a preferences file.
+
+Why this is safe to widen for milanf:
+
+* `bsd/conf/files` compiles `bsd/sweet_hfs` (the staged HFS, via
+  `xnu/patches/0026-stage-hfs.sh`, which already enumerates `SWEET|MILANF` in
+  its board selection, commit `8a9ed6b`). `config/MASTER.arm64.milanf`
+  enables `NSWEET_HFS` - without it the MILANF build dies at link on the
+  open-source asm/pmap surface, so the flag is definitely on. HFS is present.
+
+* The staged HFS provides `hfs_vnop_exchange` (`bsd/sweet_hfs/core/hfs_vnops.c`,
+  wired into the vnode-op table at the `exchange` slot), so `VNOP_EXCHANGE` is
+  not an undefined symbol on milanf. The call site's preconditions (two regular
+  files, same mount) are generic VFS logic with no board constants.
+
+* Nothing in the arm reads a sweet address, clock, or register. `VNOP_EXCHANGE`,
+  `VFS_RENAME_SWAP`, `vnode_isreg` and `vnode_mount` are all board-neutral.
+
+The comment inside the arm says `SWEET:`; once both boards share the gate that
+stops being true, so it is reworded board-neutrally. The `#endif` itself is
+bare in the source and stays bare - this patch widens one gate and rewords one
+comment line, nothing more.
+
+Verified without a compiler: fresh ci-tail (ci-art3 + 0086..0101), the `#if`
+gate asserted at exactly 1 occurrence, the comment line asserted at exactly 1
+occurrence, CR=0 in source and patch, 0086-0102 sequential apply clean (17/17).
+Inventory: 8 sites in 8 files -> **7 in 7**, negated class still 0. Link and
+boot unverified; CI in the morning.
+
+diff --git a/bsd/vfs/kpi_vfs.c b/bsd/vfs/kpi_vfs.c
+index 90cd9fc..8c2b60c 100644
+--- a/bsd/vfs/kpi_vfs.c
++++ b/bsd/vfs/kpi_vfs.c
+@@ -4459,9 +4459,9 @@ vn_rename(struct vnode *fdvp, struct vnode **fvpp, struct componentname *fcnp, s
+ 					_err = VNOP_RENAME(fdvp, *fvpp, fcnp, tdvp, *tvpp, tcnp, ctx);
+ 				}
+ 			}
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 			/*
+-			 * SWEET: HFS has no RENAME_SWAP, which Foundation's atomic
++			 * HFS has no RENAME_SWAP, which Foundation's atomic
+ 			 * writes use (usermanagerd: "Failed to atomically swap writing
+ 			 * file: Operation not supported"). Swapping two regular files
+ 			 * on one volume is what exchangedata does: each name ends up
