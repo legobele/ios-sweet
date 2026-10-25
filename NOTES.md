@@ -1212,7 +1212,98 @@ count asserted at 1, CR=0 in source and patch, 0086-0098 sequential apply clean
 (13/13). Inventory: 15 sites in 14 files -> **14 in 13**. Link unverified; CI in
 the morning.
 
-### The remaining 14 sites, classified
+### >>> 2026-10-25: 0099, syscall 435 answers nosys, and nosys raises SIGSYS <<<
+
+Two files, one decision, and they have to move together.
+
+`bsd/kern/syscalls.master:653` chooses what syscall 435 *is*:
+
+```
+#if CONFIG_EMBEDDED || defined(ARM64_BOARD_CONFIG_SWEET)
+435  AUE_NULL  ALL  { int pid_hibernate(int pid); }
+#else
+435  AUE_NULL  ALL  { int nosys(void); }
+#endif
+```
+
+`CONFIG_EMBEDDED` is a `defopt` in `config/MASTER` and this build does not set
+it. That is checkable rather than assumed: `config/MASTER.arm64.milanf` is
+byte-identical to `config/MASTER.arm64.sweet` apart from its header comment, and
+neither enables it. So on milanf, today, **syscall 435 is `nosys`, and `nosys`
+raises SIGSYS.**
+
+The tree already says what that means, in the comment above the function:
+
+> The iOS userland runs on the macOS config: SpringBoard calls `pid_hibernate`
+> when an app leaves the foreground, and nosys (SIGSYS) killed it.
+
+That is not a prediction about milanf - it is what happened on sweet, recorded by
+whoever fixed it there, with the same userland and the same syscall number.
+Milanf inherits the bug and would have inherited the diagnosis for free if anyone
+had looked.
+
+The second half is `bsd/vm/vm_unix.c:1758`, where the function itself lives:
+
+```c
+#if !XNU_TARGET_OS_OSX || defined(ARM64_BOARD_CONFIG_SWEET)
+```
+
+`XNU_TARGET_OS_OSX` is 1 for this build (`makedefs/MakeInc.def:72`), so both sides
+are false on milanf and `pid_hibernate` is not compiled at all. **This is the one
+site in the inventory where widening changes which arm the board takes** rather
+than adding a feature, which is why it was parked for a read instead of being
+swept up with the mechanical ones. The read says the change is the point.
+
+Neither half is useful alone: widen the master only and the link dies on
+`_pid_hibernate`; widen `vm_unix.c` only and the kernel compiles a function
+nothing calls. Both, together, is the only arrangement that is either correct or
+buildable.
+
+What the function does on this board is nothing, by design. `CONFIG_FREEZE` is
+also a `defopt` and is also unset here, so the body reduces to
+
+```c
+#ifndef CONFIG_FREEZE
+#pragma unused(pid)
+#else
+        ...
+#endif /* CONFIG_FREEZE */
+        if (targetproc != PROC_NULL) { proc_rele(targetproc); }
+        *ret = error;
+        return error;          /* error == 0 */
+```
+
+which is exactly iOS with the freezer disabled: report success, freeze nothing.
+The point is not the freezing. The point is that 435 stops raising SIGSYS in the
+process that called it.
+
+Nothing is lost on the macOS side either, because the guard has no `#else`:
+macOS never had this function and still does not. Sweet compiles the same text it
+did before - widened, not reordered - and nothing in the patch touches hardware,
+so the recipe that has held since 0086 applies: same config for both boards, only
+the board defines differ.
+
+**Verification note.** This is the first patch in the series whose target file is
+not consumed by a compiler. `makesyscalls.sh` is a `sed | awk` pipeline that
+copies the conditional lines through into the generated `init_sysent.c` verbatim,
+so a longer `#if` is presumably fine - and "presumably fine" is not good enough
+for the file that defines every syscall. So it was actually run, in git bash,
+over the master before and after:
+
+```
+sh makesyscalls.sh syscalls.master table
+diff -u before/init_sysent.c after/init_sysent.c
+```
+
+The generated files are 3511 lines each and differ in **exactly one line** - the
+gate - with the 435 slot carrying `pid_hibernate` on one side of it and `nosys`
+on the other. Same awk warnings about escape sequences in both runs, i.e.
+pre-existing. The master is not just "applies clean"; it parses to the intended
+table.
+
+Inventory: 14 sites in 13 files -> **13 in 12**, negated class still 0.
+
+### The remaining 13 sites, classified
 
 Not all of them are the same kind of work, and only one of them must not be
 touched at all:
@@ -1223,8 +1314,7 @@ touched at all:
 | `bsd/net/rtsock.c`, `bsd/netinet/in.c` | mechanical | |
 | `bsd/pthread/*` x3 | mechanical, as a unit | `bsd/sys/pthread_internal.h` declares what the three .c files define - it did not appear in this inventory pass, so re-check it when the trio is widened |
 | `bsd/vfs/kpi_vfs.c` | mechanical | |
-| `bsd/vm/vm_unix.c:1758` | **review** | `#if !XNU_TARGET_OS_OSX \|\| defined(...SWEET)` - milanf satisfies the left side today, so widening *changes* which arm it takes. Read it first. |
-| `pexpert/arm/pe_fiq.c:109` | mechanical, free | `virtual-timer-intid` is absent from the unit's DTB and both boards default to 19 |
+| `pexpert/arm/pe_fiq.c:109` | mechanical, free | `virtual-timer-intid` is absent from the unit's DT and both boards default to 19 |
 | `iokit/Kernel/arm/SweetBattery.cpp` | **blocked** | needs `bsd/dev/sweet_spmi.c` widened first (it calls `sweet_spmi_init`/`sweet_spmi_read`), and SPMI is real per-board work: milanf's arbiter is at 0x1c40000 with PM6125 + PMR735A + PMK8350 |
 | `bsd/dev/sweet_rpmh.c`, `bsd/dev/sweet_spmi.c` | real per-board work | the two hardware drivers |
 | `pexpert/pexpert/arm64/board_config.h:100` | **do not touch** | this is the board selector itself |

@@ -1,0 +1,116 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: syscall 435 has to answer something other than nosys
+
+Two files, one decision, and they have to move together.
+
+`bsd/kern/syscalls.master:653` chooses what syscall 435 *is*:
+
+```
+#if CONFIG_EMBEDDED || defined(ARM64_BOARD_CONFIG_SWEET)
+435  AUE_NULL  ALL  { int pid_hibernate(int pid); }
+#else
+435  AUE_NULL  ALL  { int nosys(void); }
+#endif
+```
+
+`CONFIG_EMBEDDED` is a `defopt` in `config/MASTER` and this build does not set
+it - `config/MASTER.arm64.milanf` is byte-identical to `MASTER.arm64.sweet`
+apart from its header comment, and neither enables it. So on milanf, today,
+syscall 435 is `nosys`, and `nosys` raises SIGSYS.
+
+What calls it, from the comment already sitting above the function: *the iOS
+userland runs on the macOS config, SpringBoard calls `pid_hibernate` when an app
+leaves the foreground, and `nosys` (SIGSYS) killed it.* That is not a guess about
+what might happen on milanf - it is what happened on sweet, recorded in the tree
+by whoever fixed it there, with the same userland and the same syscall number.
+Milanf inherits the bug and would inherit the diagnosis for free if anyone
+remembered to look.
+
+The other half is `bsd/vm/vm_unix.c:1758`, where the function itself lives:
+
+```
+#if !XNU_TARGET_OS_OSX || defined(ARM64_BOARD_CONFIG_SWEET)
+```
+
+`XNU_TARGET_OS_OSX` is 1 for this build (`makedefs/MakeInc.def:72`), so on milanf
+both sides are false and `pid_hibernate` is not compiled at all. This is the one
+site in the inventory where widening *changes* which arm the board takes rather
+than just adding a feature, which is why it was parked for a read instead of being
+swept up with the mechanical ones - and the read says the change is the point.
+
+Widening the master alone would produce `_pid_hibernate`, undefined, at link.
+Widening `vm_unix.c` alone would compile a function nothing references. So both,
+in one patch, is the only arrangement that is either correct or buildable.
+
+What the function does on this board: nothing, by design. `CONFIG_FREEZE` is off
+(also a `defopt`, also unset here), so the body is
+
+```c
+#ifndef CONFIG_FREEZE
+#pragma unused(pid)
+#else
+        ...
+#endif /* CONFIG_FREEZE */
+        if (targetproc != PROC_NULL) {
+                proc_rele(targetproc);
+        }
+        *ret = error;
+        return error;          /* error == 0 */
+```
+
+which is exactly iOS with the freezer disabled: report success, freeze nothing.
+The point is not the freezing. The point is that 435 stops raising SIGSYS in the
+process that called it.
+
+Nothing is lost on the macOS side: the guard has no `#else`, so macOS never had
+this function to begin with and still does not. Sweet compiles the same text it
+did before - the guard is widened, not reordered. And no hardware is touched
+anywhere in the patch, so the recipe that has held for 0086-0098 applies: same
+config for both boards, only the board defines differ, therefore anything that
+compiles for sweet compiles for milanf unless it touches sweet's hardware.
+
+Verified without a compiler: fresh ci-tail (ci-art3 + 0086..0098), both gate lines
+asserted at exactly one occurrence each, the closing `#endif` comment updated so
+it does not lie about which boards are inside, the header comment reworded
+board-neutrally, patch CR=0, both sources CR=0, 0086-0099 sequential apply clean.
+Link unverified; CI in the morning.
+
+diff --git a/bsd/kern/syscalls.master b/bsd/kern/syscalls.master
+index 422873e..2680eb5 100644
+--- a/bsd/kern/syscalls.master
++++ b/bsd/kern/syscalls.master
+@@ -650,7 +650,7 @@
+ 432	AUE_NULL	ALL	{ int audit_session_port(au_asid_t asid, user_addr_t portnamep); }
+ 433	AUE_NULL	ALL	{ int pid_suspend(int pid); }
+ 434	AUE_NULL	ALL	{ int pid_resume(int pid); }
+-#if CONFIG_EMBEDDED || defined(ARM64_BOARD_CONFIG_SWEET)
++#if CONFIG_EMBEDDED || defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 435	AUE_NULL	ALL	{ int pid_hibernate(int pid); }
+ #else
+ 435     AUE_NULL        ALL     { int nosys(void); }
+diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
+index bb4a5d8..ec57f14 100644
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -1755,9 +1755,10 @@ out:
+ 	return error;
+ }
+ 
+-#if !XNU_TARGET_OS_OSX || defined(ARM64_BOARD_CONFIG_SWEET)
++#if !XNU_TARGET_OS_OSX || defined(ARM64_BOARD_CONFIG_SWEET) || \
++    defined(ARM64_BOARD_CONFIG_MILANF)
+ /*
+- * SWEET runs the iOS userland on the macOS config: SpringBoard calls
++ * The iOS userland runs on the macOS config here: SpringBoard calls
+  * pid_hibernate when an app leaves the foreground, and nosys (SIGSYS)
+  * killed it. Without CONFIG_FREEZE this returns 0, as on iOS.
+  */
+@@ -1822,7 +1823,7 @@ out:
+ 	*ret = error;
+ 	return error;
+ }
+-#endif /* !XNU_TARGET_OS_OSX || SWEET */
++#endif /* !XNU_TARGET_OS_OSX || SWEET || MILANF */
+ 
+ #if SOCKETS
+ int
