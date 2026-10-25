@@ -1,0 +1,156 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: the IOKit bring-up trace, which is the only instrument
+ we have once userspace starts
+
+0086-0095 gave the board a root filesystem, a CPU driver, working crypto, a
+platform expert that does not assert, and an identity that does not claim to be
+an iPad. None of that is observable on milanf, because milanf has no console
+worth the name and no way to attach a debugger: what the next phase produces is
+either a boot that reaches `launchd`, or silence after the last `IOLog`. The
+instrument for that gap already exists in this tree - `sweetiolog`, added by
+0049 and extended by 0054 - and it is compiled out on milanf by the same
+narrow board gate as everything else.
+
+The tracer answers one question, repeatedly, and it is the question the
+userspace phase is really about: **which IOKit service did the process ask for
+right before it gave up.** It hooks six registry entry points:
+
+| site | function | what it reports |
+| --- | --- | --- |
+| 2678 | `internal_io_service_get_matching_services` | matching dict -> count |
+| 2778 | `is_io_service_get_matching_service` | matching dict -> class |
+| 2888 | `is_io_service_get_matching_services_bin` | binary match -> class |
+| 3363 | `is_io_registry_entry_from_path` | path -> class |
+| 4181 | `is_io_registry_entry_get_child_iterator` | plane + class |
+| 4404 | `IOUserClient::externalMethod` / open | open type -> return |
+
+and it filters by process name against the boot-arg list, so it costs one
+`proc_selfname` and a `strncmp` per call for every process it is not watching.
+Default list is `backboardd,SpringBoard` (0054's value, unchanged here), `-`
+disables it, and it self-limits at 400 lines per boot so a match storm cannot
+bury the rest of the log.
+
+Everything it calls is already ungated on milanf, which is why this is a
+mechanical widening and not a port: `PE_parse_boot_argn` is pexpert
+(`pexpert/pexpert/arm64/PE_parse_boot_argn.c`), `proc_selfname` is
+`bsd/kern/kern_proc.c:1411`, `OSSafeReleaseNULL`/`OSSerialize` are libkern, and
+`IOLog` is the console ring 0089 added. Nothing in the tracer reads a sweet
+address, a sweet clock, or a sweet register - it walks the registry plane,
+which both boards have.
+
+One thing in here looks like a syntax error and is not, so it does not get
+"fixed" by accident: `static ` on line 2602, with a trailing space and nothing
+else on the line, followed by the `#if`. 0049 split what used to be
+
+    static kern_return_t
+    internal_io_service_get_matching_services(...)
+
+so that the file-scope statics and helpers could be inserted between the
+storage class and the declaration. Preprocessor-conditional text is invisible to
+the grammar, so the enclosing guard is only ever *balanced* text: with the gate
+open the reader sees `static <statics> kern_return_t <decl>` and with the gate
+closed it sees `static kern_return_t <decl>`. Both are valid. Widening this
+gate therefore changes nothing about the shape of the file - it only stops the
+mixture from being board-specific.
+
+The header comment is reworded board-neutrally for the same reason 0094's was:
+it says "SWEET IOKit trace", and the statement stops being true of the gate once
+both boards share it. The `sweetiolog` boot-arg name and the `"IOK %s:"` log
+prefix are deliberately *not* touched - the host-side log tooling greps for
+them, and on this port the strings are the interface.
+
+Usage on milanf, which is why this patch exists at all:
+
+    tools/mkpayload.py Image ADT out.img \
+        --cmdline "debug=0xc serial=3 cpus=1 keepsyms=1 \
+                   sweetiolog=launchd,backboardd,SpringBoard"
+
+`launchd` is byte-identical in length to the default list's longest member and
+the buffer is 128 bytes, so the list has room; it is specified on the command
+line rather than in the default so that sweet's behaviour is untouched.
+
+Verified without a compiler: fresh ci-art3, 0086-0096 applied one at a time in
+order, every one exit 0, every touched file CR=0, patch CR=0. The gate count
+assertion (`expected 7, found N`) is the load-bearing check here: all seven sites
+are the same literal string, so a wrong base tree would otherwise produce a patch
+that silently widens a different number of them. Link unverified; CI in the
+morning.
+
+diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
+index 163fce1..46d586c 100644
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -2600,12 +2600,14 @@ is_io_service_match_property_table_bin(
+ }
+ 
+ static 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ /*
+- * SWEET IOKit trace: registry and matching calls made by the processes
+- * named in boot-arg sweetiolog (comma separated, default "backboardd,SpringBoard";
+- * "-" turns it off) are printed as "IOK name: ...", at most 400 lines per
+- * boot, to find out what a daemon looks for before it gives up.
++ * Bring-up IOKit trace for the Qualcomm boards: registry and matching
++ * calls made by the processes named in boot-arg sweetiolog (comma
++ * separated, default "backboardd,SpringBoard"; "-" turns it off) are
++ * printed as "IOK name: ...", at most 400 lines per boot, to find out
++ * what a daemon looks for before it gives up. The boot-arg name and
++ * the log prefix are kept as-is: the host-side tooling greps them.
+  */
+ static char sweet_iolog_names[128];
+ static int sweet_iolog_parsed;
+@@ -2675,7 +2677,7 @@ internal_io_service_get_matching_services(
+ 	if ((dict = OSDynamicCast( OSDictionary, obj))) {
+ 		IOTaskRegistryCompatibilityMatching(current_task(), dict);
+ 		OSIterator *found = IOService::getMatchingServices( dict );
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 		char sname[32];
+ 		if (sweet_iolog(sname, sizeof(sname))) {
+ 			unsigned int count = 0;
+@@ -2775,7 +2777,7 @@ internal_io_service_get_matching_service(
+ 		IOTaskRegistryCompatibilityMatching(current_task(), dict);
+ 		*service = IOService::copyMatchingService( dict );
+ 		kr = *service ? kIOReturnSuccess : kIOReturnNotFound;
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 		char sname[32];
+ 		if (sweet_iolog(sname, sizeof(sname))) {
+ 			sweet_iolog_dict(sname, "matching1", dict,
+@@ -2885,7 +2887,7 @@ internal_io_service_add_notification(
+ 			continue;
+ 		}
+ 		IOTaskRegistryCompatibilityMatching(current_task(), dict);
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 		{
+ 			char sname[32];
+ 			if (sweet_iolog(sname, sizeof(sname))) {
+@@ -3360,7 +3362,7 @@ is_io_registry_entry_from_path(
+ 	}
+ 
+ 	entry = IORegistryEntry::fromPath( path );
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 	{
+ 		char sname[32];
+ 		if (sweet_iolog(sname, sizeof(sname))) {
+@@ -4178,7 +4180,7 @@ is_io_registry_entry_get_child_iterator(
+ 
+ 	*iterator = IOUserIterator::withIterator(entry->getChildIterator(
+ 		    IORegistryEntry::getPlane( plane )));
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 	{
+ 		char sname[32];
+ 		if (sweet_iolog(sname, sizeof(sname))) {
+@@ -4401,7 +4403,7 @@ is_io_service_open_extended(
+ #endif
+ 		res = service->newUserClient( owningTask, (void *) owningTask,
+ 		    connect_type, propertiesDict, &client );
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 		{
+ 			char sname[32];
+ 			if (sweet_iolog(sname, sizeof(sname))) {

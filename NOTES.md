@@ -973,6 +973,99 @@ that still select Apple code, and 25 unwidened sweet-only chains in 18 files
 remain, all of them "milanf loses a sweet feature" rather than "milanf runs
 Apple code it cannot run".
 
+### >>> 2026-10-25: 0096, the instrument for the phase nobody can see <<<
+
+Eight patches in, the board has a root filesystem (0089), a CPU driver (0092),
+working crypto (0093), a platform expert that does not assert at the root
+handoff (0094), and an identity that stops claiming to be an iPad (0095). What
+it does not have is any way to observe what happens next.
+
+That matters more than it sounds. Sweet and milanf have no usable console and
+no debugger, so the entire userspace phase reduces to one of two outcomes: a
+boot that reaches `launchd`, or silence after the last `IOLog` with no idea
+which call was the last one. The instrument for that gap already exists in this
+tree and has since 0049 - `sweetiolog`, extended by 0054 - and it was compiled
+out on milanf by the same narrow gate as everything else.
+
+`iokit/Kernel/IOUserClient.cpp` has exactly seven board gates, and they are all
+the identical literal string, so the generator asserts the count before
+replacing any of them:
+
+```python
+n = t.count(NARROW)
+if n != 7:
+    sys.exit(...)
+```
+
+That assertion is the load-bearing check in this patch. All seven are the same
+line, so a generator run against the wrong base tree would not fail on a
+`replace_once` - it would just widen a different number of sites and produce a
+patch that looks fine.
+
+| site | function | what it reports |
+| --- | --- | --- |
+| 2603 | definition block | the tracer itself (statics + helpers) |
+| 2680 | `internal_io_service_get_matching_services` | matching dict -> count |
+| 2780 | `is_io_service_get_matching_service` | matching dict -> class |
+| 2890 | `is_io_service_get_matching_services_bin` | binary match -> class |
+| 3365 | `is_io_registry_entry_from_path` | path -> class |
+| 4183 | `is_io_registry_entry_get_child_iterator` | plane -> class |
+| 4406 | `IOUserClient::open`-side external method | open type -> return |
+
+The tracer answers one question, repeatedly, and it is the question the whole
+userspace phase is actually about: **which IOKit service did the process ask for
+right before it gave up.** It filters by process name against the boot-arg list,
+so the cost for every process it is *not* watching is one `proc_selfname` and a
+`strncmp`; it self-limits at 400 lines per boot so a match storm cannot bury the
+rest of the log; and `-` disables it.
+
+Nothing it calls is board-specific, which is why this is a mechanical widening
+rather than a port: `PE_parse_boot_argn` is pexpert, `proc_selfname` is
+`bsd/kern/kern_proc.c:1411`, `OSSerialize`/`OSSafeReleaseNULL` are libkern, and
+`IOLog` is the console ring 0089 added. No sweet address, clock or register is
+read anywhere in it - it walks the registry plane, which both boards have.
+
+**One thing in here looks like a syntax error and is not.** Line 2602 is
+`static ` - with a trailing space, nothing else on the line - and the `#if`
+follows it. 0049 split what used to be
+
+```c
+static kern_return_t
+internal_io_service_get_matching_services(...)
+```
+
+so that file-scope statics and helpers could sit between the storage class and
+the declaration. Preprocessor-conditional text is invisible to the grammar, so
+the enclosing guard is only ever *balanced text*: gate open, the reader sees
+`static <statics> kern_return_t <decl>`; gate closed, `static kern_return_t
+<decl>`. Both are valid C++. Widening the gate changes nothing about the shape
+of the file - it only stops the mixture from being board-specific. It is
+documented here because it reads like a typo and a future cleanup would happily
+"fix" it into a compile error.
+
+The header comment stops claiming to be sweet's, same reasoning as 0094: it
+said "SWEET IOKit trace", and that sentence stops being true of the gate once
+both boards share it. The `sweetiolog` boot-arg name and the `"IOK %s:"` log
+prefix are deliberately untouched - host-side tooling greps them, and on this
+port those strings are the interface.
+
+Usage on milanf, which is the whole point of the patch:
+
+```
+tools/mkpayload.py Image ADT out.img \
+    --cmdline "debug=0xc serial=3 cpus=1 keepsyms=1 \
+               sweetiolog=launchd,backboardd,SpringBoard"
+```
+
+Set on the command line rather than in the default so sweet's behaviour is
+unchanged - the default list stays `backboardd,SpringBoard` exactly as 0054 left
+it.
+
+Verified: fresh `ci-art3`, 0086-0096 one at a time in order, every one exit 0,
+CR=0 in source and patch, `#if`/`#endif` balanced 35/35 in the applied file,
+7 wide gates and 0 narrow ones remaining. Inventory drops from 25 sites in 18
+files to **18 in 17**. Link unverified; CI in the morning.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
