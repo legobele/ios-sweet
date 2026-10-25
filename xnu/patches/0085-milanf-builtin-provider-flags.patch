@@ -1,0 +1,55 @@
+From: ios-milanf-port (desk phase, 2026-10-24)
+Subject: [PATCH] MILANF: apply the built-in-provider object flags
+
+Run 40152828517 staged all three payloads for MILANF and then failed
+inside them, because the per-object flags that let Apple's kext sources
+build inside the kernel are still gated on MACHINE_CONFIG == SWEET.
+
+bsd/conf/Makefile.template: the '-include sweet_hfs_compat.h' plus the
+bsd/sweet_hfs include paths never reached the HFS objects, so the compat
+header that clears CONFIG_PROTECT was absent. The build then died on
+<AppleKeyStore/AppleKeyStoreFSServices.h> (which this tree does not have)
+and on the cp_*/ubc_* declarations that header exists to disable. The
+sweet_libpthread include paths sit in the same block.
+
+libkern/conf/Makefile.template: the bearssl includes and, more
+importantly, -mgeneral-regs-only for the AES/MD5/SHA objects. Those
+objects are 'optional crypto' and therefore already compile for MILANF,
+but they compiled with FP/SIMD codegen permitted, which kernel code must
+never have.
+
+Both gates become a filter over SWEET and MILANF. SWEET's build is
+unchanged: the filter matches it exactly as the old equality did.
+
+diff --git a/bsd/conf/Makefile.template b/bsd/conf/Makefile.template
+index f2d8bf8..f87b363 100644
+--- a/bsd/conf/Makefile.template
++++ b/bsd/conf/Makefile.template
+@@ -44,8 +44,10 @@ CFLAGS+= -include meta_features.h -DDRIVER_PRIVATE \
+         -Warray-bounds-pointer-arithmetic
+ SFLAGS+= -include meta_features.h
+ 
+-# This provider is built into SWEET; other boards use their normal kext.
+-ifeq ($(CURRENT_MACHINE_CONFIG),SWEET)
++# These providers are built into the Qualcomm port; other boards use their
++# normal kexts. MILANF stages the same sources (0019/0020/0026), so it needs
++# the same per-object flags.
++ifneq (,$(filter $(CURRENT_MACHINE_CONFIG),SWEET MILANF))
+ SWEET_PTHREAD_ROOT = $(SRCROOT)/bsd/pthread/sweet_libpthread
+ SWEET_PTHREAD_INC = -I$(SWEET_PTHREAD_ROOT) -I$(SWEET_PTHREAD_ROOT)/private -I$(SWEET_PTHREAD_ROOT)/include
+ sweet_pthread_init.o_INCFLAGS = $(SWEET_PTHREAD_INC)
+diff --git a/libkern/conf/Makefile.template b/libkern/conf/Makefile.template
+index aca295c..7fba503 100644
+--- a/libkern/conf/Makefile.template
++++ b/libkern/conf/Makefile.template
+@@ -19,7 +19,9 @@ include $(MakeInc_def)
+ CFLAGS+= -include meta_features.h -DLIBKERN_KERNEL_PRIVATE -DOSALLOCDEBUG=1
+ SFLAGS+= -include meta_features.h
+ 
+-ifeq ($(CURRENT_MACHINE_CONFIG),SWEET)
++# BearSSL sources staged by 0020 compile here for the Qualcomm port; they
++# need their own include tree and must not emit FP/SIMD in kernel code.
++ifneq (,$(filter $(CURRENT_MACHINE_CONFIG),SWEET MILANF))
+ SWEET_AES_ROOT = $(SRCROOT)/libkern/crypto/sweet_bearssl
+ SWEET_AES_INC = -I$(SWEET_AES_ROOT)/inc -I$(SWEET_AES_ROOT)/src
+ sweet_aes.o_INCFLAGS = $(SWEET_AES_INC)

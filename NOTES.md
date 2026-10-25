@@ -151,6 +151,45 @@ State of the milanf work (desk phase, no hardware yet):
   `${MACHINE_CONFIG:-SWEET}` so a log line proves which config staged. `bash -n`
   clean on all three. Note for local runs: the scripts need network (they fetch
   pinned Apple commits from github.com/apple-oss-distributions) and `xcrun`.
+- **The per-object flags were still SWEET-only — third root cause (2026-10-24).**
+  Run `40152828517` (HEAD `8a9ed6b`) proved the staging fix: the log carries
+  `Staged libpthread-514.100.2 ... for MILANF`, `Staged BearSSL ... for MILANF`
+  and `Staged hfs-627.100.6 ... for MILANF`, and the 39 missing targets are
+  gone. The build then failed *inside* the staged sources, and the reason is
+  the same bug class one layer down: the flags that make a kext's sources
+  compile inside the kernel live in `bsd/conf/Makefile.template`, behind
+  `ifeq ($(CURRENT_MACHINE_CONFIG),SWEET)`. `-include sweet_hfs_compat.h`
+  therefore never reached the HFS objects (`sweet_hfs_compat` appears zero
+  times in the whole log), so `CONFIG_PROTECT` stayed 1 and `hfs_iokit.h`
+  included `<AppleKeyStore/AppleKeyStoreFSServices.h>` — a header this tree
+  does not contain. Everything else in that error list (`cp_handle_vnop`,
+  `cp_io_params_t`, `cp_fs_protected`, `decmpfs_reset_state`, `ubc_create_upl`,
+  incomplete `struct vnode`) is the same header doing its job: the compat file
+  exists precisely to `#undef` the kernel's kext-invisible options before
+  `core/kext-config.h` decides features. `libkern/conf/Makefile.template` has
+  the identical gate, and there it is a silent-correctness problem rather than
+  a build break: the BearSSL AES/MD5/SHA objects are `optional crypto`, so they
+  already compiled for MILANF, but without `-mgeneral-regs-only` — kernel code
+  built with FP/SIMD codegen permitted. Fix `0085`: both gates become
+  `ifneq (,$(filter $(CURRENT_MACHINE_CONFIG),SWEET MILANF))`, which matches
+  SWEET exactly as before. Verified with `git apply --check`, alone and
+  together with `0084`.
+- **`0084-milanf-port-guards.patch`**: the 27 `SWEET`-only preprocessor guards
+  in the post-0083 tree that mean "this is the Qualcomm port, not Apple
+  silicon" (no corecrypto kext, no Image4/AMFI, no monitor, no closed per-SoC
+  assembly), widened to `SWEET || MILANF`. `start.s` MPIDR decode,
+  `sweet_secondary_entry` and the pre-MMU TLB/icache barrier; `cpu.c` PoC
+  cleans and bring-up observer; `machine_routines.c` cpus=N clamp via the new
+  `MILANF_SMP_MAX_CPUS 8`, Aff1 cluster decode and the `ml_enable_monitor`
+  stub; `vm_kern.c` per-CPU kmem RNG; `entropy.c`/`prng_random.c`;
+  `kern_trustcache.c`. The two topology assumptions are backed by milanf's own
+  DTB, not by analogy: every `/cpus/cpu@N` carries `enable-method = psci` and
+  `reg = 0x0 0x0 / 0x100 / ... / 0x700`, so the core id really is in MPIDR
+  Aff1 and the PSCI `CPU_ON` entry is required. Deliberately excluded: the
+  framebuffer/early-console sites (`start.s`, `arm_vm_init.c`,
+  `sweet_early.[ch]`, `debug.c`) and the eight `iokit/Kernel/arm/Sweet*`
+  drivers, which need milanf's own geometry and a larger mapping than sweet's
+  single 32 MB L2 block.
 
 ## Agent handoff / active work (2026-10-15, latest)
 

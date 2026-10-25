@@ -1,0 +1,321 @@
+From: ios-milanf-port (desk phase, 2026-10-24)
+Subject: [PATCH] MILANF: share the port's non-Apple code paths
+
+The sweet port's guards mean "this is the Qualcomm phone port, not Apple
+silicon": no corecrypto kext, no AppleImage4/AMFI, no monitor, no closed
+per-SoC assembly. MILANF needs every one of them, and MILANF's own DTB
+confirms the topology assumptions behind two of them: all eight CPUs carry
+enable-method = psci and reg = 0x0/0x100/.../0x700, so the core id really is
+in MPIDR Aff1 (same as SM7150) and the PSCI CPU_ON entry is required.
+
+Widened: start.s (MPIDR core decode, sweet_secondary_entry, local TLB/I
+invalidation before MMU), cpu.c (bootstrap-structure PoC clean, bring-up
+observer), machine_routines.c (cpus=N default + clamp, Aff1 cluster decode,
+ml_enable_monitor stub), vm_kern.c (per-CPU kmem RNG without corecrypto),
+entropy.c and prng_random.c (built-in HMAC-SHA256 DRBG instead of the absent
+corecrypto kext), kern_trustcache.c (no Image4/AMFI runtime).
+
+Not touched here: the framebuffer and early-console sites in start.s,
+arm_vm_init.c, sweet_early.[ch] and debug.c, and the iokit/Kernel/arm drivers.
+Those carry sweet's framebuffer base and geometry and need per-machine
+values plus an L3 mapping (0x85200000 is only 2MB-aligned, so sweet's single
+32MB L2 block cannot cover milanf's carveout).
+
+diff --git a/bsd/kern/kern_trustcache.c b/bsd/kern/kern_trustcache.c
+index 9066367..b581f11 100644
+--- a/bsd/kern/kern_trustcache.c
++++ b/bsd/kern/kern_trustcache.c
+@@ -248,7 +248,7 @@ trust_cache_runtime_init(void)
+ 	allow_legacy_caches = true;
+ #endif
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 	/*
+ 	 * Standalone SWEET bring-up has no AppleImage4/AMFI kexts. Represent
+ 	 * the missing service explicitly: no caches can be loaded or matched.
+@@ -493,7 +493,7 @@ check_trust_cache_runtime_for_uuid(
+ 		return KERN_INVALID_ARGUMENT;
+ 	}
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 	if (trust_cache_rt == NULL) {
+ 		return KERN_NOT_FOUND;
+ 	}
+@@ -583,7 +583,7 @@ load_trust_cache_with_type(
+ 		}
+ 	}
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 	if (trust_cache_rt == NULL) {
+ 		return KERN_NOT_SUPPORTED;
+ 	}
+@@ -695,7 +695,7 @@ load_legacy_trust_cache(
+ 		panic("overflow on the module: %p | %lu", module_data, module_size);
+ 	}
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 	if (trust_cache_rt == NULL) {
+ 		return KERN_NOT_SUPPORTED;
+ 	}
+@@ -729,7 +729,7 @@ query_trust_cache(
+ 		return KERN_INVALID_ARGUMENT;
+ 	}
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 	if (trust_cache_rt == NULL) {
+ 		if (query_type >= kTCQueryTypeTotal) {
+ 			return KERN_INVALID_ARGUMENT;
+@@ -946,7 +946,7 @@ static_trust_cache_capabilities(
+ 	*capabilities0_ret = kTCCapabilityNone;
+ 	*capabilities1_ret = kTCCapabilityNone;
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 	if (trust_cache_rt == NULL) {
+ 		return KERN_NOT_SUPPORTED;
+ 	}
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+index b082a10..a9b8377 100644
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -922,7 +922,7 @@ cpu_start(int cpu)
+ 
+ 		flush_dcache((vm_offset_t)&CpuDataEntries[cpu], sizeof(cpu_data_entry_t), FALSE);
+ 		flush_dcache((vm_offset_t)cpu_data_ptr, sizeof(cpu_data_t), FALSE);
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 		/* The reset stub loads these through physical addresses with caches off.
+ 		 * Use VA range cleans to PoC, including on coherent-I/O builds. */
+ 		extern uint8_t bootstrap_pagetables[BOOTSTRAP_TABLE_SIZE];
+@@ -963,7 +963,7 @@ cpu_start(int cpu)
+ }
+ 
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ /* Bring-up observer: the self-SGI clears SIGPdisabled after IRQs unmask. */
+ boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+ boolean_t
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index e4c15f2..8bbd8b5 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -954,14 +954,20 @@ ml_parse_cpu_topology(void)
+ 	const boolean_t cpus_boot_arg_present = PE_parse_boot_argn("cpus", &cpu_boot_arg, sizeof(cpu_boot_arg));
+ 	const boolean_t cpumask_boot_arg_present = PE_parse_boot_argn("cpumask", &cpumask_boot_arg, sizeof(cpumask_boot_arg));
+ 
+-#if defined(SWEET)
+-	/* Opt in to SMP: cpus=N (N <= SWEET_SMP_MAX_CPUS; cores 6-7 are the A76s). */
++#if defined(SWEET) || defined(MILANF)
++	/* Opt in to SMP: cpus=N, clamped to the board maximum (milanf: 8 cores). */
+ 	if (!cpus_boot_arg_present || cpu_boot_arg == 0) {
+ 		cpu_boot_arg = 1;
+ 	}
++#if defined(MILANF)
++	if (cpu_boot_arg > MILANF_SMP_MAX_CPUS) {
++		cpu_boot_arg = MILANF_SMP_MAX_CPUS;
++	}
++#else
+ 	if (cpu_boot_arg > SWEET_SMP_MAX_CPUS) {
+ 		cpu_boot_arg = SWEET_SMP_MAX_CPUS;
+ 	}
++#endif
+ #endif
+ 
+ 	// The cpus=N and cpumask=N boot args cannot be used simultaneously. Flag this
+@@ -1087,8 +1093,8 @@ ml_parse_cpu_topology(void)
+ 		}
+ #endif
+ 
+-#if defined(SWEET)
+-		/* Aff1 encodes the core on SM7150, not an Apple cluster ID. */
++#if defined(SWEET) || defined(MILANF)
++		/* Aff1 encodes the core on SM7150 and SM6375, not an Apple cluster ID. */
+ 		cpu->die_cluster_id = (int)ml_readprop(child, "die-cluster-id", 0);
+ 		cpu->cluster_core_id = (int)ml_readprop(child, "cluster-core-id", cpu->phys_id >> 8);
+ #else
+@@ -2180,9 +2186,9 @@ ml_get_decrementer(void)
+ 	return dec;
+ }
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ /*
+- * sweet: arm_vm_init() calls this unconditionally; Apple's definition (it
++ * sweet/milanf: arm_vm_init() calls this unconditionally; Apple's definition (it
+  * enters the PPL/monitor) ships only in the closed per-SoC library. There is
+  * no monitor on SWEET.
+  */
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 242664d..c70340f 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -143,8 +143,8 @@ LEXT(reset_vector)
+ 	adrp	x19, EXT(ResetHandlerData)@page			// Get address of the reset handler data
+ 	add		x19, x19, EXT(ResetHandlerData)@pageoff
+ 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
+-#if HAS_CLUSTER || defined(SWEET)
+-	and		x0, x15, #0xFFFF					// Full Aff1:Aff0 (SWEET: core in Aff1)
++#if HAS_CLUSTER || defined(SWEET) || defined(MILANF)
++	and		x0, x15, #0xFFFF					// Full Aff1:Aff0 (SWEET/MILANF: core in Aff1)
+ #else
+ 	and		x0, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
+ #endif
+@@ -279,7 +279,7 @@ LEXT(LowExceptionVectorBase)
+ LEXT(bootstrap_instructions)
+ 
+ #endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ /* PSCI CPU_ON entry (physical): x0=context_id, no stack, MMU/caches off.
+  * Keep this separate from __start (which requires x0=boot_args PA).
+  * Firmware may return at EL1 or EL2; check before accessing EL1 state.
+@@ -793,7 +793,7 @@ common_start:
+ 	ic		iallu
+ #endif
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 	/* Complete local TLB/I-cache invalidation before enabling the MMU. */
+ 	dsb		sy
+ 	isb
+diff --git a/osfmk/prng/entropy.c b/osfmk/prng/entropy.c
+index 42286ed..08fbb66 100644
+--- a/osfmk/prng/entropy.c
++++ b/osfmk/prng/entropy.c
+@@ -40,7 +40,7 @@
+ #include <machine/machine_routines.h>
+ #include <libkern/section_keywords.h>
+ #include <sys/cdefs.h>
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ #include <corecrypto/ccdigest.h>
+ #include <corecrypto/ccsha2.h>
+ #endif
+@@ -97,7 +97,7 @@ typedef struct entropy_data {
+ 	// State for a SHA256 computation. This is used to accumulate
+ 	// entropy samples from across all CPUs. It is finalized when
+ 	// entropy is provided to the consumer of this module.
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 	ccdigest_ctx_decl(CCSHA256_STATE_SIZE, CCSHA256_BLOCK_SIZE, sha256_ctx);
+ #else
+ 	SHA256_CTX sha256_ctx;
+@@ -482,7 +482,7 @@ entropy_health_test(uint32_t sample_count, entropy_sample_t *samples, __assert_o
+ static void
+ entropy_hash_init(void)
+ {
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 	ccdigest_init(&ccsha256_ltc_di, entropy_data.sha256_ctx);
+ #else
+ 	SHA256_Init(&entropy_data.sha256_ctx);
+@@ -492,7 +492,7 @@ entropy_hash_init(void)
+ static void
+ entropy_hash_update(const void *data, size_t nbytes)
+ {
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 	ccdigest_update(&ccsha256_ltc_di, entropy_data.sha256_ctx, nbytes, data);
+ #else
+ 	SHA256_Update(&entropy_data.sha256_ctx, data, nbytes);
+@@ -502,7 +502,7 @@ entropy_hash_update(const void *data, size_t nbytes)
+ static void
+ entropy_hash_final(void *out)
+ {
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 	ccdigest_final(&ccsha256_ltc_di, entropy_data.sha256_ctx, out);
+ 	ccdigest_ctx_clear(CCSHA256_STATE_SIZE, CCSHA256_BLOCK_SIZE, entropy_data.sha256_ctx);
+ #else
+@@ -524,7 +524,7 @@ entropy_provide(size_t *entropy_size, void *entropy, __unused void *arg)
+ 
+ 	// Apple platforms need the corecrypto kext's SHA256 implementation.
+ 	// SWEET links the digest into the kernel instead.
+-#if !defined(SWEET)
++#if !defined(SWEET) && !defined(MILANF)
+ 	if (__improbable(!crypto_init)) {
+ 		return sample_count;
+ 	}
+diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
+index c53d45d..509d39f 100644
+--- a/osfmk/prng/prng_random.c
++++ b/osfmk/prng/prng_random.c
+@@ -145,7 +145,7 @@ static struct {
+ 		     .strictFIPS = 0,
+ 	     }};
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ /*
+  * The corecrypto kext normally installs the kernel PRNG. SWEET has no such
+  * kext: use the built-in HMAC-SHA256 DRBG, just as early_random does. A
+@@ -473,7 +473,7 @@ int
+ write_random(void * buffer, u_int numbytes)
+ {
+ 	uint8_t seed[SHA256_DIGEST_LENGTH];
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 	/* Hash without depending on the absent corecrypto kext's dispatch table. */
+ 	const struct ccdigest_info *di = &ccsha256_ltc_di;
+ 	ccdigest_di_decl(di, ctx);
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+index 54edb01..036a9e1 100644
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -2439,9 +2439,9 @@ kmem_sizeclass_init(void)
+ 	}
+ }
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ /*
+- * No corecrypto kext is loaded on SWEET yet. The kmem RNG contract permits
++ * No corecrypto kext is loaded on the sweet port yet.
+  * a non-cryptographic generator and requires lock-free generation. Keep
+  * allocator RNG state per CPU/sizeclass; seed it from XNU's built-in early
+  * HMAC-SHA256 DRBG during single-CPU initialization.
+@@ -2485,7 +2485,7 @@ __startup_func
+ static void
+ kmem_crypto_init(void)
+ {
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 	vm_size_t ctx_size = sizeof(struct sweet_kmem_rng);
+ #else
+ 	vm_size_t ctx_size = crypto_random_kmem_ctx_size();
+@@ -2496,7 +2496,7 @@ kmem_crypto_init(void)
+ 
+ 		ks->ks_rng_ctx = zalloc_percpu_permanent(ctx_size, ZALIGN_PTR);
+ 		zpercpu_foreach(ctx, ks->ks_rng_ctx) {
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 			((struct sweet_kmem_rng *)ctx)->state = early_random();
+ #else
+ 			crypto_random_kmem_init(ctx);
+@@ -2765,7 +2765,7 @@ kmem_get_next_slot(
+ 		 */
+ 		slot_idx = kmem_get_random16((uint16_t)num_slots - 1);
+ 	} else {
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ 		slot_idx = sweet_kmem_uniform(zpercpu_get(sizeclass.ks_rng_ctx), num_slots);
+ #else
+ 		crypto_random_uniform(zpercpu_get(sizeclass.ks_rng_ctx), num_slots,
+diff --git a/pexpert/pexpert/arm64/MILANF.h b/pexpert/pexpert/arm64/MILANF.h
+index 1efb364..7da2695 100644
+--- a/pexpert/pexpert/arm64/MILANF.h
++++ b/pexpert/pexpert/arm64/MILANF.h
+@@ -49,6 +49,7 @@
+  */
+ #define MILANF_VTIMER_INTID       19
+ #define MILANF_IPI_SGI            1       // SGI used for cross-CPU signals
++#define MILANF_SMP_MAX_CPUS       8       // 8 cores; bring-up starts at cpus=1
+ 
+ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
+ 
