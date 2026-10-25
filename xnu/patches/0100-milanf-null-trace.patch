@@ -1,0 +1,120 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: the /dev/null tap, which is a daemon's last words
+
+`launchd` starts every daemon with stdout and stderr on `/dev/null`. That is
+fine on a machine with a terminal and fatal on this one: a process that prints
+its reason for dying into `/dev/null` has printed it into nothing, and the next
+thing you see is that it is gone. Pointing a launchd job at `/dev/console`
+instead does not work - the tree records the observation, on the v8 image, that
+it stops `backboardd` from launching at all.
+
+So the kernel taps the null device. Minor 2 of `/dev/null` is the write path, and
+`mmrw()` checks the writing process against a name list before discarding the
+data:
+
+```c
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+{
+        char name[32];
+        if (sweet_null_tee(name, sizeof(name))) {
+                char buf[256];
+                c = MIN(uio_curriovlen(uio), sizeof(buf));
+                error = uiomove(buf, (int)c, uio);
+                if (error) { break; }
+                printf("|%s| %.*s%s", name, (int)c, buf,
+                    (c > 0 && buf[c - 1] == '\n') ? "" : "\n");
+                continue;
+        }
+}
+#endif
+```
+
+Two details in that shape are load-bearing and easy to break:
+
+*The `continue` is what makes it safe.* A match *consumes* the write itself -
+`uiomove` into the buffer, print, `continue` - and never reaches the fall-through
+`c = uio_curriovlen(uio); error = 0;` that the null device normally uses to
+discard everything. Nothing is consumed twice and nothing is printed twice.
+
+*Non-matching processes are untouched.* `sweet_null_tee` name-matches and returns
+false, control falls into the original path, and the write is discarded exactly as
+before. The cost for every other process is one `proc_selfname` and a walk over a
+comma-separated list - the same shape as 0096's filter, on a much colder path.
+
+This is the third of the three transcripts, and the three are deliberately
+distinct:
+
+| patch | answers |
+| --- | --- |
+| 0096 `sweetiolog` | which IOKit service did a **live** daemon ask for before it gave up |
+| 0098 `sweet_crash_log` | **where** was a process when it died |
+| 0100 `sweetnull` | **what did** a process print before it died |
+
+On a device with no serial port and no way to get logs off it, that is the whole
+toolkit, and this is the cheapest of the three: it needs no registry, no frames,
+no symbolication, just the bytes the daemon itself chose to say.
+
+On milanf it is arguably the most valuable of the three, because the board's
+userspace brings up in stages and each stage fails by a daemon printing a reason
+and exiting. `launchd`'s own log goes to the console, but a job that fails after
+`exec` does not - unless it is in this list.
+
+Usage:
+
+```
+tools/mkpayload.py Image ADT out.img \
+    --cmdline "debug=0xc serial=3 cpus=1 keepsyms=1 \
+               sweetnull=launchd,backboardd,SpringBoard"
+```
+
+The default list stays `backboardd,SpringBoard` exactly as sweet has it, and the
+boot-arg name and the `|name|` prefix are deliberately unchanged: the host-side
+log tooling greps them, and on this port those strings are the interface - same
+rule as 0096.
+
+`PE_parse_boot_argn`, `proc_selfname` and `printf` are all already compiled on
+milanf; nothing in the block reads a sweet address, clock or register. The gate is
+the whole difference.
+
+Verified without a compiler: fresh ci-tail (ci-art3 + 0086..0099), both gates
+asserted at exactly 2 occurrences before replacing, header comment reworded
+board-neutrally, patch CR=0, source CR=0, 0086-0100 sequential apply clean. Link
+unverified; CI in the morning.
+
+diff --git a/bsd/dev/mem.c b/bsd/dev/mem.c
+index 291a546..b3eacdd 100644
+--- a/bsd/dev/mem.c
++++ b/bsd/dev/mem.c
+@@ -153,14 +153,16 @@ mmioctl(dev_t dev, u_long cmd, __unused caddr_t data,
+ 	return 0;
+ }
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ /*
+- * SWEET: daemons started by launchd write stdout/stderr to /dev/null, and
+- * pointing a launchd job at /dev/console stops it from launching at all
+- * (backboardd, v8 image). Instead, what the processes named in boot-arg
+- * sweetnull (comma separated, default "backboardd,SpringBoard") write to
+- * /dev/null goes to the console (and so to the persistent log) as
+- * "|name| text". sweetnull=- turns it off.
++ * /dev/null tap for the Qualcomm boards: daemons started by launchd
++ * write stdout/stderr to /dev/null, and pointing a launchd job at
++ * /dev/console stops it from launching at all (backboardd, v8 image).
++ * Instead, what the processes named in boot-arg sweetnull (comma
++ * separated, default "backboardd,SpringBoard") write to /dev/null goes
++ * to the console (and so to the persistent log) as "|name| text".
++ * sweetnull=- turns it off. The boot-arg name and the prefix are kept
++ * as-is: the host-side tooling greps them.
+  */
+ static char sweet_null_names[128];
+ static int sweet_null_parsed;
+@@ -254,7 +256,7 @@ mmrw(dev_t dev, struct uio *uio, enum uio_rw rw)
+ 			if (rw == UIO_READ) {
+ 				return 0;
+ 			}
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 			{
+ 				char name[32];
+ 				if (sweet_null_tee(name, sizeof(name))) {

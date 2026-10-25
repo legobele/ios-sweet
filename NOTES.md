@@ -1303,14 +1303,90 @@ table.
 
 Inventory: 14 sites in 13 files -> **13 in 12**, negated class still 0.
 
-### The remaining 13 sites, classified
+### >>> 2026-10-25: 0100, /dev/null is where a daemon's last words go <<<
+
+`launchd` starts every daemon with stdout and stderr on `/dev/null`. On a machine
+with a terminal that is fine; here it means a process that prints its reason for
+dying has printed it into nothing, and the next thing you see is that it is gone.
+Pointing a launchd job at `/dev/console` instead does not work - the tree records
+the observation, on the v8 image, that it stops `backboardd` from launching at
+all.
+
+So the kernel taps the device. Minor 2 of `/dev/null` is the write path, and
+`mmrw()` checks the writing process against a name list before discarding:
+
+```c
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+{
+        char name[32];
+        if (sweet_null_tee(name, sizeof(name))) {
+                char buf[256];
+                c = MIN(uio_curriovlen(uio), sizeof(buf));
+                error = uiomove(buf, (int)c, uio);
+                if (error) { break; }
+                printf("|%s| %.*s%s", name, (int)c, buf,
+                    (c > 0 && buf[c - 1] == '\n') ? "" : "\n");
+                continue;
+        }
+}
+#endif
+```
+
+Two details in that shape are load-bearing and easy to break:
+
+*The `continue` is what makes it safe.* A match *consumes* the write itself -
+`uiomove` into a 256-byte buffer, print, `continue` - and never reaches the
+fall-through `c = uio_curriovlen(uio); error = 0;` that the null device normally
+uses to discard everything. Nothing is consumed twice and nothing printed twice.
+Losing the `continue` would show each line twice and consume the uio twice.
+
+*Non-matching processes are untouched*: `sweet_null_tee` returns false, control
+falls into the original path and the write is discarded exactly as before. The
+cost for every other process is one `proc_selfname` plus a walk over a
+comma-separated list - the same filter as 0096, on a much colder path.
+
+This is the third of the three transcripts, and the three are deliberately
+different questions:
+
+| patch | answers |
+| --- | --- |
+| 0096 `sweetiolog` | which IOKit service did a **live** daemon ask for before it gave up |
+| 0098 `sweet_crash_log` | **where** was a process when it died |
+| 0100 `sweetnull` | **what did** a process print before it died |
+
+On a device with no serial port and no way to get logs off it, that is the toolkit,
+and this is the cheapest of the three: no registry, no frames, no symbolication,
+just the bytes the daemon itself chose to say. It is arguably the most valuable of
+the three on milanf, because the board brings up in stages and each stage fails by
+a daemon printing a reason and exiting - and `launchd`'s own log covers the job
+that fails *before* `exec`, not the one that fails after.
+
+Usage:
+
+```
+tools/mkpayload.py Image ADT out.img \
+    --cmdline "debug=0xc serial=3 cpus=1 keepsyms=1 \
+               sweetnull=launchd,backboardd,SpringBoard"
+```
+
+Default list unchanged at `backboardd,SpringBoard`, boot-arg name and `|name|`
+prefix unchanged, same rule as 0096: the host-side tooling greps them and on this
+port the strings are the interface. `PE_parse_boot_argn`, `proc_selfname` and
+`printf` are all already compiled on milanf; nothing in the block reads a sweet
+address, clock or register.
+
+Verified: fresh `ci-tail` (= `ci-art3` + 0086..0099), both gates asserted at
+exactly 2 occurrences before replacing, header comment reworded board-neutrally,
+CR=0 in source and patch, 0086-0100 sequential apply clean (15/15). Inventory:
+13 sites in 12 files -> **11 in 11**, negated class still 0.
+
+### The remaining 11 sites, classified
 
 Not all of them are the same kind of work, and only one of them must not be
 touched at all:
 
 | site(s) | kind | note |
 | --- | --- | --- |
-| `bsd/dev/mem.c` x2 | **tracer, same class as 0096** | this is `sweetnull`: writes to `/dev/null` from the processes named in boot-arg `sweetnull` go to the console as `\|name\| text`. Daemons started by launchd get stdout/stderr on `/dev/null`, and pointing a job at `/dev/console` stops it launching at all - so this is the only way to see what a daemon printed before it died. Arguably more valuable on milanf than `sweetiolog`. |
 | `bsd/net/rtsock.c`, `bsd/netinet/in.c` | mechanical | |
 | `bsd/pthread/*` x3 | mechanical, as a unit | `bsd/sys/pthread_internal.h` declares what the three .c files define - it did not appear in this inventory pass, so re-check it when the trio is widened |
 | `bsd/vfs/kpi_vfs.c` | mechanical | |
