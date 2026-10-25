@@ -185,11 +185,62 @@ State of the milanf work (desk phase, no hardware yet):
   `kern_trustcache.c`. The two topology assumptions are backed by milanf's own
   DTB, not by analogy: every `/cpus/cpu@N` carries `enable-method = psci` and
   `reg = 0x0 0x0 / 0x100 / ... / 0x700`, so the core id really is in MPIDR
-  Aff1 and the PSCI `CPU_ON` entry is required. Deliberately excluded: the
-  framebuffer/early-console sites (`start.s`, `arm_vm_init.c`,
-  `sweet_early.[ch]`, `debug.c`) and the eight `iokit/Kernel/arm/Sweet*`
-  drivers, which need milanf's own geometry and a larger mapping than sweet's
-  single 32 MB L2 block.
+  Aff1 and the PSCI `CPU_ON` entry is required. Deliberately excluded there:
+  the framebuffer/early-console sites (`start.s`, `arm_vm_init.c`,
+  `sweet_early.[ch]`, `debug.c`), which carry sweet's geometry and are 0086,
+  and the eight `iokit/Kernel/arm/Sweet*` drivers, which are still to do.
+- **Run `40153667697` (HEAD `b7fed5f`) compiled everything and failed at the
+  link — fourth root cause (2026-10-24).** 0084 and 0085 both did their job:
+  every object built, including the staged HFS sources, and the whole failure
+  is one undefined symbol:
+  `_sweet_sample_task, referenced from _sweet_sample_proc in sweet_sample.o`.
+  `bsd/conf/files:108` lists `bsd/dev/sweet_sample.c` as `standard`, so it is
+  compiled for every board, but the function it calls is defined in
+  `osfmk/kern/exception.c` inside `#if defined(ARM64_BOARD_CONFIG_SWEET)`
+  (L823-L1043), which also holds the console crash reporter and the heap
+  string scanner. The reporter is not board-specific - user registers, an fp
+  backtrace, the shared-cache slide, the Mach-O header, and printable strings
+  from the heaps of processes named in boot-arg `sweetscan` - and milanf is
+  the same kind of device (a phone with no way to get logs off it), so
+  `0087-milanf-crash-report.patch` widens that guard. `kern_exit.c:1889`
+  declares and calls `sweet_crash_log` under its own guard and is unchanged.
+- **`0086-milanf-early-framebuffer.patch`**: the early console, with milanf's
+  geometry, as `BOARD_EARLY_FB_PA` / `_BLOCK_PA` / `_BLOCK_OFFSET` and
+  `BOARD_FB_{WIDTH,HEIGHT,STRIDE}` in the two board headers. sweet's five
+  hardcoded values are unchanged in effect (`0x9c000000`, 1080x2400, stride
+  4320, block == buffer, offset 0). Milanf: `0x85200000`, 1080x2460, stride
+  4320, block `0x84000000`, offset `0x1200000`. Banner is now board-neutral
+  (`XNU EARLY` / `XNU EARLY PANIC:`) so bring-up output is not labelled SWEET.
+  Facts behind the numbers:
+  - the carveout is `cont_splash_region@0x85200000`, size `0xc00000` (12 MB),
+    ending exactly where `dfps_data_region@0x85e00000` (1 MB) begins, from the
+    unit's own DTB; 1080 x 2460 x 4 = 10,627,200 B fits in it.
+  - stride 4320 is proven twice: 1080 x 4, and the DTB's `panel-width = 0x438`
+    = 1080. The DTB's *static* panel list only reaches height 2340, so 2460
+    comes from the live device, corroborated by the carveout being exactly
+    large enough for it.
+  - the block trick transfers unchanged. With 16K pages `ARM_16K_TT_L1_SHIFT`
+    is 36, so an L1 entry covers 64 GB and *both* `0x9c000000` (L2 index 78)
+    and `0x84000000` (L2 index 66) live in L1 index 0 - the same first V=P L2
+    page that sweet already writes. `create_bootstrap_mapping` allocates
+    before it maps (`add $4, $4, PGBYTES` then use), so
+    `bootstrap_pagetables + 2*PGBYTES` really is that page; the old comment
+    listed the four pages in the wrong order and has been corrected.
+  - the one real difference: sweet's `0x9c000000` is below its `physBase`
+    `0xb0000000`, so its block is pure carveout. Milanf's buffer is 2 MB
+    aligned and inside RAM (DRAM starts `0x80000000`), so the containing block
+    also spans ~18 MB of RAM below the carveout. Nothing reaches that RAM
+    through the alias - the console writes only inside the framebuffer extent,
+    which the row/column math bounds - but it is documented in `MILANF.h`
+    rather than left to be discovered.
+  - the identity map is load-bearing, not an optimisation: the first console
+    call is `osfmk/arm/arm_init.c:350` ("arm_init entered (MMU on)"), long
+    before `arm_vm_init`, so the console has to work through bootstrap TTBR0.
+    The alias in the final TTBR1 is installed at `arm_vm_init.c:2184`
+    (phystokv still valid) and the console pointer moves at `:2193`, before
+    `set_mmu_ttb(invalid_ttep)`.
+  - `iso_font` resolves for MILANF: it is defined in `video_console.o` (which
+    `#include "iso_font.c"`), and `video_console.o` builds for MILANF.
 
 ## Agent handoff / active work (2026-10-15, latest)
 

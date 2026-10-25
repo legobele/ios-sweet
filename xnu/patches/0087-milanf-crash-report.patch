@@ -1,0 +1,32 @@
+From: ios-milanf-port (desk phase, 2026-10-24)
+Subject: [PATCH] MILANF: build the console crash report on milanf too
+
+bsd/conf/files lists bsd/dev/sweet_sample.c as 'standard', so it is
+compiled for every board, and it calls sweet_sample_task(). That
+function, together with the rest of the console crash reporter, is
+defined in osfmk/kern/exception.c behind
+  #if defined(ARM64_BOARD_CONFIG_SWEET)
+so the MILANF link fails with exactly one undefined symbol:
+
+  _sweet_sample_task, referenced from _sweet_sample_proc in sweet_sample.o
+
+The reporter is not board-specific: it prints user registers, a
+frame-pointer backtrace, the shared-cache slide, the Mach-O header and
+(for processes named in the sweetscan boot-arg) printable heap strings.
+Milanf is the same kind of device - a phone with no way to get logs off
+it - so the guard covers both boards. The caller in bsd/kern/kern_exit.c
+carries its own guard and stays as it is.
+
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index a20a764..d6e11a3 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -820,7 +820,7 @@ exception_triage(
+ 	return exception_triage_thread(exception, code, codeCnt, thread);
+ }
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include <vm/vm_shared_region.h>
+ #include <arm/thread.h>
+ 
