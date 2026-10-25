@@ -543,6 +543,83 @@ apply to a scratch tree - all six "Applied patch ... cleanly", CR=0 in the
 sources and in the patch. The link is unverified; that needs a push and a CI
 run in the morning.
 
+### >>> 2026-10-25: 0090, AMFI, and the panic that would have eaten the first boot <<<
+
+Two findings in `bsd/kern/bsd_init.c`, one of which is a hard stop.
+
+**The root-auth panic.** `bsd_init.c:933` calls `FSIOC_KERNEL_ROOTAUTH` on the
+mounted root; `:928` sets `require_rootauth = TRUE` for anything that is not
+macOS, and `:947` panics `"rootvp not authenticated after mounting"` if the
+volume will not attest. The sweet port carries a widened branch at `:936` that
+prints a line and continues - its HFS root cannot be a sealed volume, there is
+no rootsnap, no Image4 and no static trust cache, and the kernel itself boots
+unsigned. That branch was inside `#if defined(ARM64_BOARD_CONFIG_SWEET)`.
+
+So the sequence 0089 would have produced is: UFS comes up, GPT is scanned, HFS
+mounts, `FSIOC_KERNEL_ROOTAUTH` fails, panic. The report would have read
+"rootvp not authenticated", which is true, expected, and tells you nothing.
+Worth noting the ordering problem this exposes - 0088 (platform expert) and
+0089 (disk) both look like progress toward a boot, and neither of them would
+have got past this.
+
+**AMFI is load-bearing, not polish.** The `amfi` pointer
+(`libkern/amfi/amfi.c`, 293 bytes) is `SECURITY_READ_ONLY_LATE` and starts
+`NULL`; `amfi_interface_register()` is the only writer, and on milanf nothing
+called it because both `bsd/kern/sweet_amfi.c` and the `bsd_init.c` call site
+are sweet-gated. What that costs:
+
+| site | failure |
+| --- | --- |
+| `kern_cs.c:739` | explicit `panic("CoreEntitlements: missing AMFI bridge")` on `amfi == NULL` |
+| `kern_trustcache.c:86` | `panic("amfi interface not available")` |
+| `kern_trustcache.c:816` | `amfi->TrustCache.version` deref with **no** NULL check |
+| `kern_cs.c:514` | `amfi->OSEntitlements_invalidate(...)` under a `csb_entitlements != NULL` test only |
+
+The two trust-cache panics sit behind `trust_cache_rt != NULL`, which is
+probably false on a non-Apple boot - which is why milanf has not fallen over
+yet. "Probably" is doing a lot of work in that sentence.
+
+The quieter loss is the interesting one. `sweet_amfi.c`'s MAC policy is what
+sets `CS_SIGNED` and `CS_PLATFORM_BINARY` on every binary on the root
+filesystem (they are ad-hoc signed; without the policy they are platform
+binaries only through Apple's static trust cache, which does not exist here),
+and what attaches the XML entitlements blob to each signature. It also
+registers the **"Sandbox"** MAC policy. The file's own comment records the
+cost of its absence: `libsystem_sandbox` calls `__mac_syscall("Sandbox", ...)`,
+every call returns `ENOPOLICY`, launchd reports `error = 159: Sandbox
+restriction`, backboardd cannot reach mobilegestalt or iohideventsystem, and
+tccd says "profile not found". That is a userspace that looks like it is dying
+of a dozen unrelated diseases.
+
+`iokit/Kernel/arm/SweetEntitlements.cpp` ships with it because it is the other
+half of one mechanism: `sweet_amfi.c` declares seven `sweet_entitlements_*`
+entry points as extern and that is the file defining them (confirmed: exactly
+seven definitions, `create`/`copy_dict`/`copy_xml`/`bool`/`string`/`count`/
+`copy_object`). Enabling either alone leaves a dangling reference - a loud
+failure, at least.
+
+Registration order is unchanged: the interface registers from
+`STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE)` so it exists before any exec, and
+the two MAC policies register from `bsd_init` after `vfsinit()`, the first
+point `mac_policy_register()` is legal.
+
+**Dependency audit for these two files**, since no compiler is available and a
+missing symbol would only show up at link: every function call in both files
+was resolved against the tree. The only extern declaration in `sweet_amfi.c`
+is `osobject_release` (ungated `OSObject.cpp`). `csblob_get_entitlements`
+(`ubc_subr.c:845`), `csproc_get_blob`/`csblob_os_entitlements_get`/`_set`
+(`kern_cs.c:579/773/753`), `mac_policy_register` (`policy_check.c:555`),
+`__mac_syscall` (`security/mac_base.c:1567`) and `amfi_interface_register`
+(`libkern/amfi/amfi.c:8`) were all checked for board guards: **none of those
+files carries a single `#if defined(SWEET)`/`MILANF` guard.** `kern_cs.c` in
+particular has zero board-config sites, so nothing in the CS path is compiled
+out on milanf. `work_interval_create` and `__mac_syscall` appear in
+`sweet_amfi.c` only in prose comments.
+
+Verified: apply `--check` exit 0 alone and exit 0 in series order behind
+0086-0090, then a real apply to a scratch tree - three files cleanly, CR=0 in
+sources and patch. Link unverified; that needs CI.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

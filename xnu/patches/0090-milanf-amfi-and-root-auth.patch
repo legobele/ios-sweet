@@ -1,0 +1,138 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: built-in AMFI, and the root-auth panic that would have eaten the first boot
+
+Two things, and the second one is the reason this is not simply "enable another
+driver".
+
+**1. The root-auth panic.** bsd_init.c calls FSIOC_KERNEL_ROOTAUTH on the
+mounted root and, for anything that is not macOS, sets require_rootauth = TRUE
+and panics "rootvp not authenticated after mounting" if the volume will not
+attest. The sweet port carries a widened branch that prints a line and
+continues, because its HFS root cannot be a sealed volume - there is no
+rootsnap, no chain of trust, and the kernel itself is booted unsigned. That
+branch is inside #if defined(ARM64_BOARD_CONFIG_SWEET). So the first milanf
+boot that actually mounts a root filesystem would have gone: UFS comes up from
+0089, GPT is scanned, HFS mounts, FSIOC_KERNEL_ROOTAUTH fails, panic - and the
+report would have said "rootvp not authenticated", which is true, expected, and
+completely uninformative. Widened here alongside the AMFI work because it is
+the same statement: this board has no chain of trust to extend.
+
+**2. AMFI is load-bearing, not polish.** The 'amfi' interface pointer
+(libkern/amfi/amfi.c) is NULL until something registers one, and on milanf
+nothing does, because bsd/kern/sweet_amfi.c is gated on
+ARM64_BOARD_CONFIG_SWEET and bsd_init.c never calls
+sweet_amfi_policy_register(). What that means in practice:
+
+  - kern_cs.c:739 has an explicit
+    panic("CoreEntitlements: missing AMFI bridge") on amfi == NULL.
+  - kern_trustcache.c:86 has panic("amfi interface not available"), and
+    kern_trustcache.c:816 dereferences amfi->TrustCache.version with no NULL
+    check at all. Both are behind a trust_cache_rt != NULL check that is
+    probably false on a non-Apple boot, which is why milanf has not fallen over
+    yet - but "probably" is doing a lot of work in that sentence.
+
+  - The interesting loss is quieter. sweet_amfi.c's MAC policy is what sets
+    CS_SIGNED and CS_PLATFORM_BINARY on every binary on the root filesystem
+    (they are ad-hoc signed and would otherwise be platform binaries only
+    through Apple's static trust cache, which does not exist here), and what
+    attaches the XML entitlements blob to each signature. Without it, exec
+    still works but every process is unentitled and unplatformed.
+
+  - It also registers the "Sandbox" MAC policy. The port's own comment records
+    what its absence costs: libsystem_sandbox calls __mac_syscall("Sandbox",
+    ...) and without a policy of that name every call returns ENOPOLICY, at
+    which point launchd reports "error = 159: Sandbox restriction", backboardd
+    cannot reach mobilegestalt or iohideventsystem, and tccd says "profile not
+    found". That is a userspace that looks like it is dying of a dozen
+    unrelated diseases.
+
+SweetEntitlements.cpp comes with it because it is the other half of one
+mechanism: sweet_amfi.c declares its seven sweet_entitlements_* entry points as
+extern, and this is the file that defines them. Enabling either alone would
+leave a dangling reference - which is exactly what the linker would have said,
+so at least that failure mode is loud.
+
+Registration order is unchanged from sweet: the interface registers from
+STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE) so it exists before any exec, and the
+two MAC policies register from bsd_init after vfsinit(), which is the first
+point mac_policy_register() is legal.
+
+IOLog/printf strings keep the SWEET: prefix, same reason as 0088/0089: the
+pull and symbolication tooling greps them. The two prose comments that claimed
+the board specifically are made board-neutral.
+
+Verified without a compiler: apply --check exit 0 alone and in series order
+behind 0086-0089 (none of those touch these three files), then a real apply to
+a scratch tree - all cleanly, CR=0 in sources and patch. Link unverified; CI
+in the morning.
+
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index bb2a2bf..fbdfcd6 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -691,8 +691,8 @@ bsd_init(void)
+ 	bsd_init_kprintf("calling vfsinit\n");
+ 	vfsinit();
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-	/* AMFI's MAC policy is built in on SWEET (bsd/kern/sweet_amfi.c). */
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
++	/* AMFI and Sandbox MAC policies are built in (bsd/kern/sweet_amfi.c). */
+ 	extern void sweet_amfi_policy_register(void);
+ 	sweet_amfi_policy_register();
+ #endif
+@@ -933,11 +933,12 @@ bsd_init(void)
+ 		if (require_rootauth) {
+ 			/* enforce sealedness */
+ 			int autherr = VNOP_IOCTL(rootvnode, FSIOC_KERNEL_ROOTAUTH, NULL, 0, vfs_context_kernel());
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ 			/*
+-			 * SWEET has no chain of trust to extend: the kernel itself is
+-			 * booted unsigned and there is no Image4/AMFI, and its HFS root
+-			 * cannot be a sealed volume. Report it instead of panicking.
++			 * This port has no chain of trust to extend: the kernel itself
++			 * is booted unsigned, there is no Image4 and no static trust
++			 * cache, and its HFS root cannot be a sealed volume. Report it
++			 * instead of panicking.
+ 			 */
+ 			if (autherr) {
+ 				printf("SWEET: root volume is not authenticated (error %d); continuing unsealed\n", autherr);
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index cb67b4d..a9f2fd4 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -22,7 +22,7 @@
+  * Interfaces no kernel path uses on SWEET (they serve other Apple kexts)
+  * panic with a clear message instead of being NULL.
+  */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_MILANF)
+ #include <kern/debug.h>
+ #include <kern/startup.h>
+ #include <libkern/amfi/amfi.h>
+@@ -380,4 +380,4 @@ sweet_amfi_policy_register(void)
+ 	printf("SWEET Sandbox: permissive policy %s (%d)\n",
+ 	    error ? "NOT registered" : "registered", error);
+ }
+-#endif /* ARM64_BOARD_CONFIG_SWEET */
++#endif /* ARM64_BOARD_CONFIG_SWEET || ARM64_BOARD_CONFIG_MILANF */
+diff --git a/iokit/Kernel/arm/SweetEntitlements.cpp b/iokit/Kernel/arm/SweetEntitlements.cpp
+index 6186541..7310151 100644
+--- a/iokit/Kernel/arm/SweetEntitlements.cpp
++++ b/iokit/Kernel/arm/SweetEntitlements.cpp
+@@ -10,7 +10,7 @@
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ #include <IOKit/IOLib.h>
+ #include <libkern/c++/OSArray.h>
+ #include <libkern/c++/OSBoolean.h>
+@@ -181,4 +181,4 @@ sweet_entitlements_copy_object(const void *obj, const char *name)
+ 	return v;
+ }
+ }
+-#endif /* SWEET */
++#endif /* SWEET || MILANF */
