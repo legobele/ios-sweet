@@ -1066,6 +1066,117 @@ CR=0 in source and patch, `#if`/`#endif` balanced 35/35 in the applied file,
 7 wide gates and 0 narrow ones remaining. Inventory drops from 25 sites in 18
 files to **18 in 17**. Link unverified; CI in the morning.
 
+### >>> 2026-10-25: 0097, the display pair, and arithmetic that changed a condition <<<
+
+Two drivers in one patch because they cannot be separated. `AppleCLCD` publishes
+the panel memory *as* a `SweetSurface` (`sweet_surface_create_physical`), looks
+swaps up by surface id (`sweet_surface_copy`) and hands the default surface's
+port to the user client (`sweet_surface_port_in_task`). A framebuffer without
+the surface table links against nothing and matches nothing.
+
+`IOCoreSurfaceRoot` is the other half of the same story: iOS userland does not
+talk to surfaces directly, it opens `IOSurfaceRoot` and creates them through it,
+so the framebuffer's own surface is useless to CoreAnimation unless the root
+user client is registered too. Both are `IOResources` personalities, which is
+what makes them cheap - no provider, no DT node, no board values.
+
+**And that is the finding: there are no board values in this driver.** Not one.
+`SweetSurface.cpp` contains zero board macros - every `SWEET_SURFACE_*` is its
+own internal limit, not hardware - and `SweetFramebuffer.cpp` reads its geometry
+from `PE_current_console()`, which on both boards is `PE_state.video`, copied out
+of `boot_args->Video` by `pexpert/arm/pe_init.c:406-417`. On milanf that is
+1080x2460 at 0x85200000, stride 4320, straight from `shim/milanf-config.h` and
+the shim's `ba->Video.v_*` block. The "real per-board values" this file was
+supposed to need did not exist to add.
+
+What it had instead was a condition that encoded sweet's panel size:
+
+```c
+if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H)
+```
+
+The presentation size is not free. The iOS userland only carries status-bar and
+layout data for real iPhone screens - the comment above the constant cites
+UIKit's "No status bar visual provider for screen" and the red
+rdar://45025538 bar for 360x800 points, which is *exactly* what 1080x2400 at 3x
+is - so both boards present as the iPhone X panel, 1125x2436 (375x812 @3x), and
+the physical panel is centered inside that canvas at 1:1.
+
+| board | panel | canvas | offset |
+| --- | --- | --- | --- |
+| sweet | 1080x2400 | 1125x2436 | +22, +18 (panel smaller: canvas cropped) |
+| milanf | 1080x2460 | 1125x2436 | +22, **-12** (panel larger: canvas letterboxed) |
+
+2400 fits in 2436. 2460 does not. So on milanf the test failed, `fLogicalW/H`
+stayed at the physical size, and the service would have reported `GetDisplaySize`
+1080x2460 while its own provider `disp0` publishes `canvas-width 1125 /
+canvas-height 2436` from the ADT. Two different answers to the same question,
+and the userland believes both. Nothing about that shows up in a build log; it
+needs the two numbers side by side.
+
+The fix is to drop the size test and let the offsets go negative, because the
+swap copy already handles that direction:
+
+```c
+dx -= fOffX;
+dy -= fOffY;
+if (dy < 0) { sy -= dy; h += dy; dy = 0; }      /* clips the top edge */
+```
+
+With `fOffY = (2436 - 2460) / 2 = -12`, a full-canvas layer gets `dy = +12`, its
+height clamps to `fHeight - dy = 2448`, and all 2436 canvas rows land on panel
+rows 12..2447 at 1:1. Nothing is scaled and nothing is cropped vertically - the
+canvas is letterboxed, 12 rows above and 12 below. Horizontally nothing changes:
+`fOffX = +22`, so the canvas is cropped 22 px left and 23 px right, exactly as on
+sweet, and it stays inside the iPhone X status bar's own padding.
+
+The letterbox rows are the one thing the swap path never touches, so they would
+keep whatever the boot console last drew there forever - white text on black
+across the top and bottom edge of the screen, which reads as corruption rather
+than as a design. They are zeroed once in `start()` when `fOffY < 0`: 24 rows on
+milanf, a no-op on sweet whose offsets are both positive. Deliberately not a
+full panel clear - the kernel console stays visible until the first swap, which
+is the entire point of the early framebuffer in 0086.
+
+Finally the personalities: `IOCoreSurfaceRoot` (IOResources) and `AppleCLCD`
+(`IOPlatformDevice`, `IONameMatch 'sweet,display'` - the name
+`tools/mkadt-milanf.py:231` already publishes on `/arm-io/disp0`). Guard-widen
+and personality ship together, for the reason 0088 recorded: a personality whose
+class does not exist only earns an IOKit "can't find class" line, and a class
+with no personality is dead code.
+
+No new constant was needed anywhere. 1080 x 2460 x 4 = 10,627,200 bytes and
+`cont_splash_region` is 12 MB at 0x85200000 - it fits with 1.6 MB to spare,
+which is also why 0086 could carve the console out of the same 32 MB L2 block.
+
+Verified: fresh `ci-art3`, 0086-0097 one at a time in order, every one exit 0,
+CR=0 in all four sources and in the patch. Inventory: 18 sites in 17 files ->
+**15 in 14**. Link unverified; CI in the morning.
+
+### The remaining 15 sites, classified
+
+Not all of them are the same kind of work, and only one of them must not be
+touched at all:
+
+| site(s) | kind | note |
+| --- | --- | --- |
+| `bsd/dev/mem.c` x2 | **tracer, same class as 0096** | this is `sweetnull`: writes to `/dev/null` from the processes named in boot-arg `sweetnull` go to the console as `\|name\| text`. Daemons started by launchd get stdout/stderr on `/dev/null`, and pointing a job at `/dev/console` stops it launching at all - so this is the only way to see what a daemon printed before it died. Arguably more valuable on milanf than `sweetiolog`. |
+| `bsd/kern/kern_exit.c` | mechanical | needs a read of the site before widening |
+| `bsd/net/rtsock.c`, `bsd/netinet/in.c` | mechanical | |
+| `bsd/pthread/*` x3 | mechanical, as a unit | `bsd/sys/pthread_internal.h` declares what the three .c files define - it did not appear in this inventory pass, so re-check it when the trio is widened |
+| `bsd/vfs/kpi_vfs.c` | mechanical | |
+| `bsd/vm/vm_unix.c:1758` | **review** | `#if !XNU_TARGET_OS_OSX \|\| defined(...SWEET)` - milanf satisfies the left side today, so widening *changes* which arm it takes. Read it first. |
+| `pexpert/arm/pe_fiq.c:109` | mechanical, free | `virtual-timer-intid` is absent from the unit's DTB and both boards default to 19 |
+| `iokit/Kernel/arm/SweetBattery.cpp` | **blocked** | needs `bsd/dev/sweet_spmi.c` widened first (it calls `sweet_spmi_init`/`sweet_spmi_read`), and SPMI is real per-board work: milanf's arbiter is at 0x1c40000 with PM6125 + PMR735A + PMK8350 |
+| `bsd/dev/sweet_rpmh.c`, `bsd/dev/sweet_spmi.c` | real per-board work | the two hardware drivers |
+| `pexpert/pexpert/arm64/board_config.h:100` | **do not touch** | this is the board selector itself |
+
+The `proc_reg.h` gap flagged in the previous block is already closed:
+`osfmk/arm64/proc_reg.h:224` carries an `#elif defined (MILANF)` arm (Kryo 660,
+A78 + A55) with the same cache-line geometry as sweet's - 6, i.e. 64 bytes, for
+both I and D. The inventory never saw it because it is an `#elif` with a milanf
+sibling, which is the shape the tool is supposed to be blind to.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

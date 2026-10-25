@@ -1,0 +1,263 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: the surface machinery and the built-in framebuffer
+
+Two drivers, one patch, because they cannot be separated: `AppleCLCD` publishes
+the panel memory *as* a `SweetSurface` (`sweet_surface_create_physical`), looks
+swaps up by surface id (`sweet_surface_copy`), and hands the default surface's
+port to the user client (`sweet_surface_port_in_task`). A framebuffer without
+the surface table links against nothing and matches nothing.
+
+`IOCoreSurfaceRoot` is the other half of the same story. iOS userland does not
+talk to surfaces directly - it opens `IOSurfaceRoot` and creates them through
+it - so the framebuffer's own surface is useless to CoreAnimation unless the
+root user client is registered too. Both are `IOResources` personalities, which
+is what makes them cheap: no provider, no DT node, no board values.
+
+**What is actually board-specific here: nothing.** `SweetSurface.cpp` contains
+zero board macros (the `SWEET_SURFACE_*` names are its own limits, not hardware),
+and `SweetFramebuffer.cpp` reads its geometry from `PE_current_console()`, which
+on both boards is `PE_state.video` copied out of `boot_args->Video` by
+`pexpert/arm/pe_init.c:406-417`. On milanf that is 1080x2460 at 0x85200000 with
+stride 4320, straight out of `shim/milanf-config.h` and the shim's
+`ba->Video.v_*` assignments. So this is a gate widen plus one genuine logic fix.
+
+**The logic fix is the interesting part.** The presentation size is not free:
+the iOS userland only carries status-bar and layout data for real iPhone
+screens, so both boards present as the iPhone X panel - 1125x2436, 375x812
+points at 3x - and the physical panel is centered inside that canvas at 1:1.
+The gate for that was
+
+    if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H)
+
+which is correct for exactly one panel shape: one that *fits inside* the canvas.
+Sweet's 1080x2400 does (offsets +22, +18: the canvas is cropped at the edges by
+the panel). Milanf's 1080x2460 does not - it is 24 rows *taller* than the canvas
+- so the condition fails, `fLogical*` stay at the physical size, and the service
+would report `GetDisplaySize` 1080x2460 while its provider `disp0` publishes
+`canvas-width 1125 / canvas-height 2436` from the ADT. Two different answers to
+the same question, and the userland believes both.
+
+The fix is to drop the size test and let the offsets go negative, because the
+copy already handles that direction correctly:
+
+    dx -= fOffX;
+    dy -= fOffY;
+    if (dy < 0) { sy -= dy; h += dy; dy = 0; }      /* clips the top edge */
+
+with `fOffY = (2436 - 2460) / 2 = -12`, `dy` becomes `+12` for a full-canvas
+layer, the height is clamped to `fHeight - dy = 2448`, and the whole 2436-row
+canvas lands on panel rows 12..2447 at 1:1. Nothing is scaled and nothing is
+cropped vertically - the canvas is *letterboxed*, 12 rows above and 12 below.
+Horizontal behaviour is unchanged: `fOffX = (1125 - 1080) / 2 = +22`, so the
+canvas is cropped by 22 px left and 23 px right, exactly as on sweet.
+
+The letterbox rows are the one thing the swap path never touches, so they would
+keep whatever the boot console last drew there forever - white text on black
+across the top and bottom edge of the screen, which reads as corruption. They
+are zeroed once in `start()` when the offsets are negative (24 rows on milanf,
+no-op on sweet, whose offsets are both positive). Deliberately *not* a full
+panel clear: the kernel console stays visible until the first swap, which is the
+whole point of the early framebuffer in 0086.
+
+Finally the personalities. The milanf arm of `iokit/KernelConfigTables.cpp` gains
+`IOCoreSurfaceRoot` (IOResources) and `AppleCLCD` (`IOPlatformDevice`, matching
+`'sweet,display'` - the name `tools/mkadt-milanf.py:231` already publishes on
+`/arm-io/disp0`). Guard-widen and personality ship together for the reason noted
+in 0088: a personality whose class does not exist only earns an IOKit
+"can't find class" line, and a class with no personality is dead code.
+
+The derived size needs no new constant: 1080 x 2460 x 4 = 10,627,200 bytes, and
+the carveout the shim points at is `cont_splash_region` - 12 MB at 0x85200000.
+It fits with 1.6 MB to spare, which is also why `BOARD_EARLY_FB_*` in 0086 could
+use the same 32 MB L2 block for the console.
+
+Verified without a compiler: fresh ci-art3, 0086-0097 applied one at a time in
+order, every one exit 0, every touched file CR=0, patch CR=0. Link unverified;
+CI in the morning.
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index a62416c..5d67e9f 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -1,7 +1,9 @@
+ /*
+- * Built-in IOMobileFramebuffer for SWEET: the ABL's continuous-splash
+- * framebuffer (1080x2400 a8r8g8b8 in RAM, the panel scans it out by
+- * itself) as the main display, driven by CoreAnimation's CPU renderer.
++ * Built-in IOMobileFramebuffer for the Qualcomm boards: the ABL's
++ * continuous-splash framebuffer (a8r8g8b8 in RAM, the panel scans it
++ * out by itself) as the main display, driven by CoreAnimation's CPU
++ * renderer. Geometry comes from the boot_args video block, so the two
++ * boards differ only in what the shim put there.
+  *
+  * IOMobileFramebuffer.framework (iOS 16.7) counts /arm-io children with
+  * device_type "display-subsystem", waits for that many services matching
+@@ -38,7 +40,7 @@
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -74,8 +76,10 @@ enum {
+  * The iOS userland only has status bar / layout data for real iPhone
+  * screens (UIKit: "No status bar visual provider for screen", the red
+  * rdar://45025538 bar for 360x800 points). The display is therefore
+- * presented as the iPhone X panel, 1125x2436 (375x812 points @3x), and the
+- * centered 1080x2400 part of it is shown on the 1080x2400 panel.
++ * presented as the iPhone X panel, 1125x2436 (375x812 points @3x), and
++ * the physical panel is centered inside it at 1:1 - cropped where the
++ * panel is smaller than the canvas (sweet, 1080x2400), letterboxed
++ * where it is larger (milanf, 1080x2460).
+  * Boot-arg sweetfb_native=1 presents the real panel size instead.
+  */
+ #define SWEET_FB_LOGICAL_W              1125
+@@ -170,7 +174,13 @@ AppleCLCD::start(IOService *provider)
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+-	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
++	/*
++	 * No size test: a panel smaller than the canvas is cropped by a
++	 * positive offset and a taller one is letterboxed by a negative
++	 * one. The swap path clamps both directions (see the dy < 0 case),
++	 * so the canvas is always 1:1 and never scaled.
++	 */
++	if (!native) {
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
+@@ -187,6 +197,34 @@ AppleCLCD::start(IOService *provider)
+ 		OSSafeReleaseNULL(fWorkLoop);
+ 		return false;
+ 	}
++	/*
++	 * A panel taller than the canvas leaves rows no swap will ever
++	 * reach. Black them once so they do not keep the boot console
++	 * forever: 12 rows above and 12 below on milanf, none on sweet.
++	 * Not a full clear - the console stays visible until first swap.
++	 */
++	if (fOffY < 0) {
++		/* Rows above and below the canvas no swap ever reaches. */
++		uint32_t above = (uint32_t)(-(int64_t)fOffY);
++		uint32_t seen  = fLogicalH;
++
++		if (above > fHeight) {
++			above = fHeight;
++		}
++		if (seen > fHeight - above) {
++			seen = fHeight - above;
++		}
++		if (above > 0) {
++			memset((void *)fPixels, 0, (size_t)above * fRowBytes);
++		}
++		if (above + seen < fHeight) {
++			uint32_t below = fHeight - above - seen;
++			uint8_t *tail  = (uint8_t *)fPixels +
++			    (uint64_t)(above + seen) * fRowBytes;
++
++			memset(tail, 0, (size_t)below * fRowBytes);
++		}
++	}
+ 	fVsync = IOTimerEventSource::timerEventSource(this, &AppleCLCD::vsyncFired);
+ 	if (fVsync == NULL || fWorkLoop->addEventSource(fVsync) != kIOReturnSuccess) {
+ 		IOLog("SWEET FB: no vsync timer\n");
+@@ -568,4 +606,4 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 	}
+ 	return ret;
+ }
+-#endif /* SWEET */
++#endif /* SWEET || MILANF */
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 7f90c56..536524c 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -27,7 +27,7 @@
+  */
+ #include "SweetSurface.h"
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -881,4 +881,4 @@ IOSurfaceRootUserClient::getTargetAndTrapForIndex(IOService **targetP, UInt32 in
+ 	*targetP = this;
+ 	return &sweet_surface_traps[index];
+ }
+-#endif /* SWEET */
++#endif /* SWEET || MILANF */
+diff --git a/iokit/Kernel/arm/SweetSurface.h b/iokit/Kernel/arm/SweetSurface.h
+index fbcdfac..00bd773 100644
+--- a/iokit/Kernel/arm/SweetSurface.h
++++ b/iokit/Kernel/arm/SweetSurface.h
+@@ -1,5 +1,5 @@
+ /*
+- * Built-in IOSurface for SWEET (see SweetSurface.cpp).
++ * Built-in IOSurface for the Qualcomm boards (see SweetSurface.cpp).
+  *
+  * Shared with SweetFramebuffer.cpp: the framebuffer looks surfaces up by
+  * id when a swap names them and publishes the panel memory itself as the
+@@ -10,7 +10,7 @@
+ 
+ #include <pexpert/arm64/board_config.h>
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(MILANF)
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+ #include <libkern/c++/OSObject.h>
+@@ -61,5 +61,5 @@ SweetSurface *sweet_surface_create_physical(uint64_t phys, uint32_t width,
+ /* Send right for the surface in task (IOSurfaceLookupFromMachPort). */
+ mach_port_name_t sweet_surface_port_in_task(SweetSurface *surface, task_t task);
+ 
+-#endif /* SWEET */
++#endif /* SWEET || MILANF */
+ #endif /* _SWEET_SURFACE_H */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 757aeb1..3609c68 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -84,13 +84,16 @@ const char * gIOKernelConfigTables =
+     "   },"
+ #elif defined(ARM64_BOARD_CONFIG_MILANF)
+     /*
+-     * milanf gets the platform expert, the CPU driver, and the two
+-     * services a device with no passcode and no reset path needs:
+-     * AppleKeyStore and IOWatchdog. Every other Sweet* driver is still
+-     * an empty translation unit on this board, and a personality
+-     * whose class does not exist only earns an IOKit "can't find
+-     * class" line. They come back one at a time, each with its own
+-     * board values and its own personality here.
++     * milanf gets the platform expert, the CPU driver, the two
++     * services a device with no passcode and no reset path needs
++     * (AppleKeyStore and IOWatchdog), and the display pair - the
++     * surface root plus the built-in framebuffer that publishes the
++     * panel memory through it - which carries no board values at all:
++     * geometry comes from the boot_args video block. Every other
++     * Sweet* driver is still an empty translation unit on this board,
++     * and a personality whose class does not exist only earns an
++     * IOKit "can't find class" line. They come back one at a time,
++     * each with its own board values and its own personality here.
+      *
+      * IONameMatch is "xiaomi,sweet" and that is deliberate, not a
+      * copy-paste slip: the milanf ADT root compatible list is
+@@ -121,6 +124,16 @@ const char * gIOKernelConfigTables =
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = IOWatchdog;"
+     "   },"
++    "   {"
++    "     'IOClass'         = IOCoreSurfaceRoot;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = IOCoreSurfaceRoot;"
++    "   },"
++    "   {"
++    "     'IOClass'         = AppleCLCD;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'sweet,display';"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"
