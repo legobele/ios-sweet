@@ -901,6 +901,78 @@ deref it. The arm is load-bearing, not cosmetic.
 Verified: fresh `ci-art3`, 0086-0094 one at a time in order, every one exit 0,
 CR=0 in source and patch. Link unverified; CI in the morning.
 
+### >>> 2026-10-25: 0095, hw.machine has to name this device <<<
+
+The one other negated gate in the tree, found by teaching `guards.py` to look
+for the class 0094 exposed. `bsd/kern/kern_mib.c:521`:
+
+```c
+#if XNU_TARGET_OS_OSX && defined(__arm64__) && !defined(ARM64_BOARD_CONFIG_SWEET)
+```
+
+`XNU_TARGET_OS_OSX` is 1 for this build (`makedefs/MakeInc.def:72` adds it for
+the macOS deployment target, which is what the port builds - and is the only
+reason sweet's gate does anything). So milanf takes the `#if` arm, which
+hardcodes `hw.machine`:
+
+```c
+if (proc_platform(req->p) == PLATFORM_IOS) {
+        strlcpy(dummy, "iPad8,6", sizeof(dummy));
+} else {
+        strlcpy(dummy, "arm64", sizeof(dummy));
+}
+```
+
+and reports `hw.model` from `PEGetProductName`. Both boards want the `#else`
+arm, `PEGetMachineName` / `PEGetModelName`. Nothing here has to be guessed,
+because `SweetPlatformExpert` derives from `IODTPlatformExpert` and on arm64
+the four callouts map onto two DT properties:
+
+| callout | reads | milanf value |
+| --- | --- | --- |
+| `getMachineName` | provider `model` | `iPhone10,3` |
+| `getModelName` | first `compatible` | `D22AP` |
+| `getTargetName` | `getModelName` | `D22AP` |
+| `getProductName` | `getMachineName` | `iPhone10,3` |
+
+and `tools/mkadt-milanf.py:271-272` publishes exactly that - `compatible =
+D22AP, iPhone10,3, motorola,milanf, qcom,sm6375, xiaomi,sweet, AppleARM` with
+`model = iPhone10,3`. So the two arms disagree on both variables:
+
+| sysctl | milanf today | intended |
+| --- | --- | --- |
+| `hw.machine` | `iPad8,6` (iOS process) or `arm64` | `iPhone10,3` |
+| `hw.model` | `iPhone10,3` | `D22AP` |
+
+`hw.machine = iPad8,6` is the bad half: an iPad 8,6 is an A12 tablet, and any
+iOS-userland code that branches on `uname(2)` - MobileGestalt clients, idiom
+and asset selection, launchd conditions - is being told the device is a
+different product family than the DT, the platform expert and the framebuffer
+geometry all describe. `hw.model` then answers `iPhone10,3` where the
+target/product convention wants `D22AP`, which is precisely the inconsistency
+the upstream comment above the block complains about.
+
+`hw.target` and `hw.product` were already right on both boards, because both
+arms call `PEGetTargetName`/`PEGetProductName` - so a casual `sysctl` sweep
+would have missed this entirely. Only the two deprecated variables were lying.
+
+The stale comment moves while the gate is widened. It reads "SWEET: the macOS
+config runs the iOS userland, which wants the device-tree names (hw.machine
+iPhone10,3, hw.model D22AP)" and it currently sits *inside* the `#if` - inside
+the arm it argues against, where it is dead on both boards. It now sits at the
+top of the `#else`, reworded to name both boards and to state the values.
+
+Widening needs a line continuation: the original condition is already 83
+columns, and a third term puts it at 124.
+
+Verified: fresh `ci-art3`, 0086-0095 one at a time in order, every one exit 0,
+CR=0 in source and patch. Link unverified; CI in the morning.
+
+Both gate classes are now closed - `guards.py` reports **0** negated sweet gates
+that still select Apple code, and 25 unwidened sweet-only chains in 18 files
+remain, all of them "milanf loses a sweet feature" rather than "milanf runs
+Apple code it cannot run".
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

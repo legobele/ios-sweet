@@ -1,0 +1,105 @@
+From: ios-milanf-port (desk phase, 2026-10-25)
+Subject: [PATCH] MILANF: hw.machine and hw.model have to be this device
+
+The second and last negated board gate in the tree, found by teaching
+`guards.py` to look for them after 0094 turned one up. A negated gate is not a
+site that loses milanf code - it is a site that keeps Apple's arm, which on
+this port is wrong in a way that is invisible in the log and visible to every
+userspace process that calls `uname(2)`.
+
+The gate:
+
+    #if XNU_TARGET_OS_OSX && defined(__arm64__) && !defined(ARM64_BOARD_CONFIG_SWEET)
+
+`XNU_TARGET_OS_OSX` is 1 for this build - `makedefs/MakeInc.def:72` adds it for
+the macOS deployment target, which is what the port builds; that is also why
+sweet's gate does anything at all. So milanf takes the `#if` arm:
+
+    case HW_MACHINE:
+        if (proc_platform(req->p) == PLATFORM_IOS) {
+            strlcpy(dummy, "iPad8,6", sizeof(dummy));   /* hardcoded */
+        } else {
+            strlcpy(dummy, "arm64", ...);
+        }
+    case HW_MODEL:
+        PEGetProductName(dummy, 64);   /* -> getMachineName() on arm64 */
+
+and the `#else` arm - the one both boards want - is:
+
+    case HW_MACHINE:  PEGetMachineName(dummy, 64);
+    case HW_MODEL:    PEGetModelName(dummy, 64);
+
+What those resolve to is not a guess. `SweetPlatformExpert` derives from
+`IODTPlatformExpert`, and on arm64 the four callouts map like this:
+
+| callout | reads | value on milanf |
+| --- | --- | --- |
+| `getMachineName` | provider `model` | `iPhone10,3` |
+| `getModelName` | first `compatible` | `D22AP` |
+| `getTargetName` | `getModelName` | `D22AP` |
+| `getProductName` | `getMachineName` | `iPhone10,3` |
+
+and `tools/mkadt-milanf.py:271-272` publishes exactly that: `compatible =
+D22AP | iPhone10,3 | motorola,milanf | qcom,sm6375 | xiaomi,sweet | AppleARM`
+with `model = iPhone10,3`. So the two arms disagree on both variables:
+
+| sysctl | milanf today | intended |
+| --- | --- | --- |
+| `hw.machine` | `iPad8,6` (iOS process) or `arm64` | `iPhone10,3` |
+| `hw.model` | `iPhone10,3` | `D22AP` |
+
+`hw.machine = "iPad8,6"` is the bad one: an iPad 8,6 is an A12 tablet, and
+anything in the iOS userland that branches on `uname(2)` - MobileGestalt
+clients, idiom/asset pickers, launchd conditions - is being told the device is
+something the DT, the platform expert and the framebuffer geometry all say it
+is not. `hw.model` then reports `iPhone10,3` where the target/product
+convention wants `D22AP`, which is the exact inconsistency the upstream
+comments above the block complain about.
+
+`hw.target` and `hw.product` were already correct on both boards, because both
+arms call `PEGetTargetName`/`PEGetProductName` - which is why this would not
+show up in a casual `sysctl` sweep, only in the two deprecated variables.
+
+The stale comment also moves while the gate is being widened. It reads "SWEET:
+the macOS config runs the iOS userland, which wants the device-tree names
+(hw.machine iPhone10,3, hw.model D22AP)" and it currently sits *inside* the
+`#if` - that is, inside the arm it argues against, where it is dead code on
+both boards. It now sits at the top of the `#else` arm, reworded to name the
+boards and to say what the values actually are.
+
+Widening the negated gate needs a line continuation: the original condition is
+already 83 columns and adding a third term puts it at 124.
+
+Verified without a compiler: fresh ci-art3, 0086-0095 applied one at a time in
+order, every one exit 0, every touched file CR=0, patch CR=0. Link unverified;
+CI in the morning.
+
+diff --git a/bsd/kern/kern_mib.c b/bsd/kern/kern_mib.c
+index ac1eba0..5f8f0a7 100644
+--- a/bsd/kern/kern_mib.c
++++ b/bsd/kern/kern_mib.c
+@@ -518,9 +518,8 @@ sysctl_hw_generic(__unused struct sysctl_oid *oidp, void *arg1,
+ 		 * Deprecated variables.  We still support these for
+ 		 * backwards compatibility purposes only.
+ 		 */
+-#if XNU_TARGET_OS_OSX && defined(__arm64__) && !defined(ARM64_BOARD_CONFIG_SWEET)
+-	/* SWEET: the macOS config runs the iOS userland, which wants the
+-	 * device-tree names (hw.machine iPhone10,3, hw.model D22AP). */
++#if XNU_TARGET_OS_OSX && defined(__arm64__) && !defined(ARM64_BOARD_CONFIG_SWEET) \
++    && !defined(ARM64_BOARD_CONFIG_MILANF)
+ 	/* The following two are kludged for backward
+ 	 * compatibility. Use hw.product/hw.target for something
+ 	 * consistent instead. */
+@@ -553,6 +552,12 @@ sysctl_hw_generic(__unused struct sysctl_oid *oidp, void *arg1,
+ 		dummy[64] = 0;
+ 		return SYSCTL_OUT(req, dummy, strlen(dummy) + 1);
+ #else
++	/*
++	 * The Qualcomm boards run the iOS userland under the macOS config,
++	 * which wants the device-tree names rather than the hardcoded
++	 * "iPad8,6"/"arm64": hw.machine iPhone10,3, hw.model D22AP, both read
++	 * out of the ADT root node by IODTPlatformExpert.
++	 */
+ 	case HW_MACHINE:
+ 		bzero(dummy, sizeof(dummy));
+ 		if (!PEGetMachineName(dummy, 64)) {
