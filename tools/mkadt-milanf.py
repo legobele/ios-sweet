@@ -30,22 +30,36 @@ import adt  # noqa: E402
 from mkadt import d22ap_product, node, u32, u64, cstr  # noqa: E402
 
 # --- Memory map -------------------------------------------------------------
-# UNKNOWN: kernel-managed RAM window. Sweet's 0xb0000000 does NOT
-# transfer: SM6375 DRAM starts at 0x80000000 (CITED: mainline memory
-# node memory@80000000; the bootloader fills in the size) and the
-# carve-out layout differs. Resolve from the unit's live FDT: the
-# /memory node bank(s) minus every reserved-memory region, exactly
-# the way upstream derived sweet's from its live FDT.
-PHYS_BASE = None  # UNKNOWN — unit DTB (recon decompile report)
-MEM_SIZE = None   # UNKNOWN — unit DTB (recon decompile report)
+# RESOLVED from the unit's own DTB /memory node, cross-checked against the
+# running Android kernel's /proc/iomem. Both agree, which is the point of
+# checking: the DTB says what the bootloader declared, iomem says what a
+# real kernel actually managed to use.
+#
+# /memory has three banks:
+#   0x080000000 .. 0x0bbb00000   955 MB   shredded by firmware carveouts
+#   0x0c0000000 .. 0x180000000  3072 MB   first 0x7100000 is removed_region
+#   0x180000000 .. 0x280000000  4096 MB   entirely free
+# and there is a genuine hole at 0xbbb00000..0xc0000000 (69 MB) that is not
+# RAM at all, so the naive "8GB starting at 0x80000000" is wrong.
+#
+# Sweet's shape transfers, though: a low window below 4GB plus a separate
+# --highmem tree, both hole-free, both 256MB-aligned, both with the early
+# framebuffer BELOW dram-base. iomem confirms these two windows contain no
+# reserved children:
+#   0xd0000000 .. 0xf0800000   520 MB   (the 0xbf00000 above it is reserved)
+#   0x200000000 .. 0x280000000 2048 MB  (four contiguous 512MB chunks)
+# That is 2.5GB to bring up on, which is an iPhone 8's worth - enough, and
+# it can be grown later once a boot tells us what the firmware tolerates.
+# Keeping the framebuffer below dram-base also means the FB block no longer
+# overlaps kernel-managed RAM, which is the situation 0086 documented.
+PHYS_BASE = 0xd0000000
+MEM_SIZE = 0x20800000
 # Panic log buffer, carved from the TOP of the dram range (policy, same
 # as sweet; without it the kernel hangs after "kdp_core zlib memory").
 PANIC_LOG_SIZE = 0x100000
-# --highmem: the whole upper DDR bank.
-# UNKNOWN: bank split on the 8 GB unit. Resolve from the unit's live
-# FDT /memory node (recon decompile report).
-HIGH_PHYS_BASE = None  # UNKNOWN — unit DTB
-HIGH_MEM_SIZE = None   # UNKNOWN — unit DTB
+# --highmem: a hole-free 2GB window well above the 32-bit line.
+HIGH_PHYS_BASE = 0x200000000
+HIGH_MEM_SIZE = 0x80000000
 # /arm-io children are relative to this; it must not be 0 (serial_init
 # bails). ADT bookkeeping, not a hardware fact; same value as sweet.
 SOC_BASE = 0x01000000
@@ -59,25 +73,30 @@ GICD, GICD_SIZE = 0x0f200000, 0x10000
 GICR, GICR_SIZE = 0x0f240000, 0x100000
 
 # --- Splash framebuffer -----------------------------------------------------
-# UNKNOWN: whether Moto ABL leaves a splash framebuffer at all is SPEC
-# §13 unknown 1 (the §1.1 probe); its address/size/geometry come from
-# the unit DTB's reserved-memory (look for a cont_splash / framebuffer
-# region or a simple-framebuffer node). Sweet's 0x9c000000 / 1080x2400
-# values are the SM7150 unit's and must not be copied here.
-FB = None        # UNKNOWN — unit DTB + §1.1 probe
-FB_SIZE = None   # UNKNOWN — unit DTB
-FB_W = None      # UNKNOWN — unit DTB (panel native width)
-FB_H = None      # UNKNOWN — unit DTB (panel native height)
-FB_STRIDE = None  # UNKNOWN — unit DTB (bytes per row; sweet was W*4)
+# RESOLVED for geometry from the unit's own DTB. Whether Moto ABL leaves a
+# LIVE buffer there (SPEC §13 unknown 1) is still only settled by the §1.1
+# probe, which needs a boot - so these values are right for the ADT and the
+# console, and liveness stays open.
+#
+# reserved-memory: cont_splash_region@0x85200000, size 0xc00000 (12MB),
+# ending exactly where dfps_data_region@0x85e00000 (1MB) begins.
+#   1080 x 2460 x 4 = 10627200 bytes, which fits in the carveout.
+#   stride 4320 corroborated by the DTB's panel-width = 0x438 = 1080.
+#   height 2460 is from the live device; the DTB's static panel list only
+#   reaches 2340, but the carveout is sized for 2460 and the panel reports it.
+# Sweet's 0x9c000000 / 1080x2400 are the SM7150 unit's and are not reused.
+FB, FB_SIZE = 0x85200000, 0x00c00000   # cont_splash_region; size = carveout
+FB_W, FB_H, FB_STRIDE = 1080, 2460, 1080 * 4
 
 MILANF_ECID = 0x4d494c414e460001  # 'MILANF' + 1, synthetic (fork choice)
 
 # --- UFS host ---------------------------------------------------------------
-# UNKNOWN: mainline sm6375.dtsi has NO UFS node at all (only SDHCI), so
-# there is nothing to cite. Resolve from the unit DTB's ufshc@ node
-# (recon decompile report) or the downstream SM6375 kernel source.
-UFS = None       # UNKNOWN — unit DTB ufshc reg
-UFS_SIZE = None  # UNKNOWN — unit DTB ufshc reg
+# RESOLVED - the unit's own DTB. /soc/ufshc@4804000 declares three banks,
+# reg-names "ufs_mem", "ufs_ice", "ufs_ice_hwkm"; the UFSHCI register
+# window is the first one, 0x4804000 for 0x3000 bytes. Mainline
+# sm6375.dtsi has no UFS node at all (only SDHCI), so this comes off the
+# device and nowhere else.
+UFS, UFS_SIZE = 0x04804000, 0x3000
 
 # CITED: 19.2 MHz XO is the Qualcomm platform timebase (mainline
 # sm6375.dtsi XO clock); CNTFRQ itself is set by ABL. Confirm vs DTB.
@@ -98,21 +117,12 @@ CPU_COMPATIBLE = 'qcom,kryo660'
 CPU_FREQ_LITTLE = 1804800000
 CPU_FREQ_BIG = 2208000000
 
-UNKNOWNS = [
-    ('PHYS_BASE', 'unit DTB /memory banks minus reserved-memory (recon decompile report)'),
-    ('MEM_SIZE', 'unit DTB /memory banks minus reserved-memory (recon decompile report)'),
-    ('FB', 'unit DTB reserved-memory splash region + SPEC §1.1 probe'),
-    ('FB_SIZE', 'unit DTB reserved-memory splash region'),
-    ('FB_W', 'unit DTB panel node / splash region'),
-    ('FB_H', 'unit DTB panel node / splash region'),
-    ('FB_STRIDE', 'unit DTB splash region (expect W*4, verify)'),
-    ('UFS', 'unit DTB ufshc@ node reg (mainline sm6375.dtsi has no UFS node)'),
-    ('UFS_SIZE', 'unit DTB ufshc@ node reg'),
-]
-HIGHMEM_UNKNOWNS = [
-    ('HIGH_PHYS_BASE', 'unit DTB /memory second bank'),
-    ('HIGH_MEM_SIZE', 'unit DTB /memory second bank'),
-]
+# Every hardware value this file needs is now taken from the unit itself -
+# its DTB, cross-checked against the running Android kernel's iomem. The
+# gate stays: it is what stops a future edit from quietly reintroducing a
+# guess and shipping a DO-NOT-BOOT tree that looks finished.
+UNKNOWNS = []
+HIGHMEM_UNKNOWNS = []
 
 
 def _check_unknowns(highmem, allow_placeholders):

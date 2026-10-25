@@ -12,14 +12,30 @@
 #include "loader.h"
 #include "ufs.h"
 
-#define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
 #define RESTART_BOOTLOADER	0x77665500U
+
+#if defined(MILANF)
+#include "milanf-config.h"
+#define IMEM_RESTART_REASON	MILANF_IMEM_RESTART_REASON
+#define GICD_BASE		MILANF_GICD_BASE
+#define GICR_BASE		MILANF_GICR_BASE
+#define GICR_SIZE		MILANF_GICR_SIZE
+#define GICR_PE_SIZE		MILANF_GICR_PE_SIZE
+/* The milanf DTB has no pshold node and the stock kernel resets through
+ * PSCI SYSTEM_RESET, which is the shim's primary path anyway. There is no
+ * address to cite for the fallback, so it is compiled out rather than
+ * guessed. See milanf-config.h. */
+#define HAVE_PSHOLD		0
+#else
+#define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
 #define PSHOLD			0x0c264000UL
 
 #define GICD_BASE		0x17a00000UL
 #define GICR_BASE		0x17a60000UL
 #define GICR_SIZE		0x100000UL
 #define GICR_PE_SIZE		0x20000UL
+#define HAVE_PSHOLD		1
+#endif
 #define GICR_TYPER		0x08
 #define GICR_WAKER		0x14
 #define GICR_SGI		0x10000
@@ -109,7 +125,9 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	wr32(IMEM_RESTART_REASON, RESTART_BOOTLOADER);
 	__asm__ volatile("dsb sy" ::: "memory");
 	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
+#if HAVE_PSHOLD
 	wr32(PSHOLD, 0);
+#endif
 	for (;;)
 		__asm__ volatile("wfe");
 }

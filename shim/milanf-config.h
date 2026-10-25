@@ -21,19 +21,25 @@
  */
 #pragma once
 
-/* --- Framebuffer console (console.h) ----------------------------------
- * STATUS: UNKNOWN (all four).
- * Source: the unit DTB's reserved-memory — look for a cont_splash /
- * framebuffer region, or a simple-framebuffer node; whether Moto ABL
- * leaves a live splash framebuffer at all is SPEC §13 unknown 1,
- * settled by the §1.1 probe (BRINGUP.md §3). Sweet's values
- * (0x9c000000, 1080x2400, stride 4320) are SM7150-unit-specific and
- * must NOT be copied here.
- *   FB_BASE   = ?
- *   FB_W      = ?   (panel native width)
- *   FB_H      = ?   (panel native height)
- *   FB_STRIDE = ?   (expect W*4 for a8r8g8b8; verify)
+/* --- Framebuffer console (console.h, mmu.h) ---------------------------
+ * STATUS: RESOLVED for geometry (the unit's own DTB). Liveness is still
+ * UNVERIFIED — nothing has been booted on this device yet, so "the display
+ * engine keeps scanning this buffer out" remains the §1.1 probe
+ * (BRINGUP.md §3).
+ *
+ * cont_splash_region@0x85200000, size 0xc00000 (12MB). It ends exactly
+ * where dfps_data_region@0x85e00000 (1MB) begins, which is what a real
+ * splash carveout looks like rather than a generic reservation.
+ *   1080 x 2460 x 4 = 10627200 bytes, which fits in the 12MB region.
+ *   stride 4320 is corroborated by the DTB's panel-width = 0x438 = 1080.
+ *   height 2460 is from the live device: the DTB's static panel list only
+ *   reaches 2340, but the carveout is sized for 2460 and the panel reports
+ *   it. The iOS side maps the same buffer (xnu patch 0086).
  */
+#define MILANF_FB_BASE		0x85200000UL
+#define MILANF_FB_W		1080
+#define MILANF_FB_H		2460
+#define MILANF_FB_STRIDE	(MILANF_FB_W * 4)
 
 /* --- GIC (shim.c) ------------------------------------------------------
  * STATUS: CITED — mainline sm6375.dtsi, intc: interrupt-controller@f200000
@@ -48,22 +54,32 @@
 #define MILANF_GICR_PE_SIZE	0x20000UL
 
 /* --- UFS host (ufs.c) --------------------------------------------------
- * STATUS: UNKNOWN.
- * Mainline sm6375.dtsi has NO UFS node (only SDHCI), so there is no
- * citable address. Source: the unit DTB's ufshc@ node reg, or the
- * downstream SM6375 kernel DTS. Sweet's 0x01d84000 must NOT be
- * assumed to carry over.
- *   UFS_BASE = ?
+ * STATUS: RESOLVED - the unit's own DTB.
+ * /soc/ufshc@4804000  reg = <0x4804000 0x3000  0x4808000 0x8000
+ *                            0x4810000 0x9000>
+ *                     reg-names = "ufs_mem", "ufs_ice", "ufs_ice_hwkm"
+ * The UFSHCI register window is the first (ufs_mem) bank, 0x4804000 for
+ * 0x3000 bytes. Mainline sm6375.dtsi indeed has no UFS node, so this
+ * comes off the device and nothing else. Sweet's 0x01d84000 does not
+ * carry over, as suspected.
  */
+#define MILANF_UFS_BASE		0x04804000UL
+#define MILANF_UFS_SIZE		0x3000UL
 
 /* --- Restart path (shim.c) ---------------------------------------------
- * STATUS: UNKNOWN (both).
- * SM7150's values (IMEM restart_reason at 0x146aa65c, PSHOLD at
- * 0x0c264000) are SoC-specific register addresses in the
- * qcom,msm-imem / pshold nodes. Sources: the unit DTB's
- * qcom,msm-imem node children and the downstream sm6375 pshold node.
- * Until resolved, the milanf shim's reset path is PSCI SYSTEM_RESET
- * only (the probe code already falls back to it).
- *   IMEM_RESTART_REASON = ?
- *   PSHOLD              = ?
+ * IMEM_RESTART_REASON: RESOLVED - the unit's own DTB.
+ *   /soc/qcom,msm-imem@c125000  reg = <0xc125000 0x1000>
+ *   /soc/qcom,msm-imem@c125000/restart_reason@65c  reg = <0x65c 0x4>
+ * so the register is 0xc125000 + 0x65c = 0x0c12565c. (Sweet's 0x146aa65c
+ * is the SM7150 IMEM base, not a fixed offset.)
+ *
+ * PSHOLD: DELIBERATELY ABSENT on milanf, not unknown.
+ * The shim's reset sequence is PSCI SYSTEM_RESET first (shim.c reset()),
+ * and PSHOLD only as the fallback that runs if the SMC returns. The TZ
+ * on this SoC answers SYSTEM_RESET - it is what the stock kernel uses -
+ * and no pshold node exists anywhere in the unit's DTB, so there is no
+ * value to cite. Leaving the write compiled out is honest; inventing an
+ * address to fill the slot is not. If the SMC ever fails to reset the
+ * device, this is the line to revisit.
  */
+#define MILANF_IMEM_RESTART_REASON	0x0c12565cUL

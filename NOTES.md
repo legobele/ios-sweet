@@ -242,6 +242,127 @@ State of the milanf work (desk phase, no hardware yet):
   - `iso_font` resolves for MILANF: it is defined in `video_console.o` (which
     `#include "iso_font.c"`), and `video_console.o` builds for MILANF.
 
+### >>> 2026-10-24/25 overnight: the MILANF kernel build is GREEN <<<
+
+**Run `40154918003` on `52583a5` (0086 + 0087) passed.** macos 13.5,
+DEVELOPMENT, MILANF; all eight build steps green; the collected artifact is
+`kernel.development.milanf` at **16,990,464 bytes** (plus the
+`kernel.development.milanf.link/` directory). Root causes 1-4 are closed and
+the MILANF machine config now builds and links end to end.
+
+Read the log carefully before calling that a lie, because it contains 11
+`error:` lines and 14,712 `warning:` lines:
+
+- every `error:` is dxb's own patch-apply noise for `TrustCache.patch`,
+  `iobuffermemd_monterey.patch`, `skywalk_sonoma.patch` and
+  `syntax_checker_sonoma.patch`, and each is immediately preceded by
+  `[warning] Skipping patch ... (already upstream, previously applied, or
+  malformed)`. None come from the ios-sweet patch series.
+- the `warning:` count is baseline xnu style noise
+  (`-Wdeclaration-after-statement`, `-Wformat-nonliteral`) that sweet's builds
+  have too. Nothing new is attributable to 0086/0087.
+
+`keep_going=true` does not hide a failure: the previous run reported
+`failure` for the same one-symbol link error.
+
+**Front camera is OV16A1Q.** Two independent confirmations:
+- `/vendor/lib64/hw/camera.qcom.so` contains the literal string `ov16a1q`,
+  alongside `ov32b40` and `ov64b` for the 32 MP and 64 MP rear parts.
+- `dumpsys media.camera` gives the Front device `pixelArraySize 2304x1728`,
+  which is OV16A1Q's 16 MP 4608x3456 array 2x2-binned.
+
+Dead ends worth recording so nobody repeats them: the sensor drivers are not
+modules (nothing matching `ov*`/`imx*`/`s5k*` in `/vendor/lib/modules`, and
+`camera.ko` is 4.8 MB with no sensor-name strings); `/vendor_dlkm/lib/modules`
+and `/odm/lib/modules` are empty; the DT declares only generic
+`qcom,cam-sensor@0..3` on `cci0`/`cci1`; `/sys/class/video4linux/*/name` is
+empty and stays empty after `adb root`; `/proc/kallsyms` has no sensor driver
+symbols. The vendor HAL binary is the only place the part number appears.
+
+**Shim ledger closed except one deliberate gap.** In `shim/milanf-config.h`:
+
+| value | source | result |
+| --- | --- | --- |
+| `MILANF_FB_BASE` / `W` / `H` / `STRIDE` | DTB `cont_splash_region` | `0x85200000`, 1080, 2460, 4320 |
+| `MILANF_UFS_BASE` / `_SIZE` | DTB `/soc/ufshc@4804000` | `0x04804000`, `0x3000` |
+| `MILANF_IMEM_RESTART_REASON` | DTB `qcom,msm-imem@c125000/restart_reason@65c` | `0x0c12565c` |
+| `PSHOLD` | no `pshold` node in the DTB | deliberately absent |
+
+The UFSHCI window is the first of `ufshc@4804000`'s three `reg` banks
+(`reg-names` = `ufs_mem`, `ufs_ice`, `ufs_ice_hwkm`); mainline sm6375.dtsi
+really does have no UFS node, so the device is the only source. IMEM is
+`0xc125000 + 0x65c`. Sweet's `0x146aa65c` is the SM7150 IMEM *base*, not a
+fixed offset, which is why it does not carry over.
+
+`PSHOLD` is labelled deliberately absent rather than unknown, and that
+distinction is the point: `reset()` already issues PSCI `SYSTEM_RESET` first
+and only falls back to the PSHOLD write if the SMC returns, the TZ on this SoC
+does answer `SYSTEM_RESET` (it is what the stock kernel uses), and there is no
+address in the DTB to cite. The fallback write is compiled out behind
+`HAVE_PSHOLD`; inventing an address to fill the slot would have been worse.
+
+Use sites are wired with the same board-switch pattern as the framebuffer, so
+sweet's build stays byte-identical: `console.h` (`FB_*`), `mmu.h` (`FB_PHYS`),
+`shim.c` (`GICD_BASE`, `GICR_BASE/_SIZE/_PE_SIZE`, `IMEM_RESTART_REASON`,
+`HAVE_PSHOLD`), `ufs.c` (`UFS_BASE`). `build-milanf.sh` now passes `-DMILANF=1`
+in `CFLAGS` and to the host test, and its gate 1 (refuse on `STATUS: UNKNOWN`)
+passes. Gates 2 and 3 still refuse, both on purpose: `MILANF_DTB` and the
+mkbootimg header offsets/`MILANF_HEADER_VERIFIED=1` need the stock `boot.img`
+unpacked with `tools/unpack_bootv2.py`, and nothing has done that yet.
+
+**ADT memory map resolved, from the DTB and cross-checked against the running
+kernel.** `/proc/iomem` on the live unit and the DTB `/memory` node agree,
+which is why both were used: the DTB says what the bootloader declared, iomem
+says what a real Linux kernel actually managed to claim.
+
+- `/memory` has three banks: `0x080000000..0x0bbb00000` (955 MB, shredded by
+  firmware carveouts), `0x0c0000000..0x180000000` (3072 MB, whose first
+  `0x7100000` is `removed_region`), `0x180000000..0x280000000` (4096 MB,
+  entirely free). There is a real hole at `0xbbb00000..0xc0000000`, so the
+  obvious "8 GB from `0x80000000`" is wrong.
+- sweet's *shape* transfers: one low window below 4 GB and a separate
+  `--highmem` tree, both hole-free, both 256 MB aligned, both with the early
+  framebuffer below `dram-base`. iomem confirms neither window contains a
+  reserved child:
+  `0xd0000000..0xf0800000` (520 MB) and `0x200000000..0x280000000` (2048 MB).
+- `0xc7100000` would have been the honest start of the low window but is
+  128 MB-aligned; `0xd0000000` costs 113 MB and is 256 MB-aligned like sweet's
+  `0xb0000000`. 2.5 GB is an iPhone 8's worth of RAM to bring up on, and it
+  can grow once a boot says what the firmware tolerates.
+- keeping the framebuffer below `dram-base` also makes the 0086 note about the
+  FB block overlapping ~18 MB of RAM moot in practice - that RAM is no longer
+  kernel-managed. The note stays because it is true of the hardware layout.
+
+Verified by generating both trees: `firmware-version` is `milanf-shim`, not the
+`PLACEHOLDERS-DO-NOT-BOOT` marker; low gives `dram-base 0xd0000000` with the
+panic log at `0xf0700000`; high gives `dram-base 0x200000000` and
+`dram-size 0x7ff00000`; `sweet-fbcon` is `<0x85200000 0xc00000>` at
+1080x2460/4320; `sweet-ufs` is `<0x4804000 0x3000>`. The gic node reads
+`0xe200000`, which is `0xf200000 - SOC_BASE(0x1000000)` - the same offset
+sweet's ADT applies (its `0x17a00000` GICD is emitted as `0x16a00000`), so
+that is correct, not a typo. `UNKNOWNS` and `HIGHMEM_UNKNOWNS` are now empty
+lists and the gate code stays, so a future edit that reintroduces a guess
+trips it instead of shipping a finished-looking DO-NOT-BOOT tree.
+
+**Overnight constraints from the operator (via Lux, 2026-10-24).** Giulia is
+asleep and Lux answers for her on a periodic check-in. Explicitly barred until
+morning, and therefore not done: **no pushing to GitHub**, no flashing any
+image, no booting a shim/kernel image, no bootloader lock/unlock, no wiping
+data. `52583a5` was pushed and dispatched *before* that instruction arrived,
+so run `40154918003` is legitimately green upstream; everything below it is
+committed locally on `milanf` and needs Giulia's push + CI dispatch in the
+morning.
+
+**Open, in order:**
+1. Push the local commits, dispatch CI, confirm still green.
+2. Unpack the stock `boot.img` (`tools/unpack_bootv2.py`) to fill gates 2/3 and
+   get an actual `shim-boot-milanf.img`. There is no
+   `aarch64-linux-gnu-gcc` on this machine, so the shim cannot be
+   compile-checked locally - it has only been read through by hand.
+3. The eight `iokit/Kernel/arm/Sweet*` drivers, starting with
+   `SweetPlatformExpert.cpp` (boot-critical), then the `SweetFramebuffer`
+   handoff to the real panel geometry.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

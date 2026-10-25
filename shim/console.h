@@ -1,10 +1,18 @@
 #pragma once
 #include <stdint.h>
 
+#if defined(MILANF)
+#include "milanf-config.h"
+#define FB_BASE		MILANF_FB_BASE	/* cont_splash_region@0x85200000 */
+#define FB_W		MILANF_FB_W
+#define FB_H		MILANF_FB_H
+#define FB_STRIDE	MILANF_FB_STRIDE
+#else
 #define FB_BASE		0x9c000000UL	/* reserved-memory cont_splash_region */
 #define FB_W		1080
 #define FB_H		2400
 #define FB_STRIDE	(FB_W * 4)	/* a8r8g8b8, matches mainline simplefb */
+#endif
 
 #define RED	0xffff0000U
 #define BLUE	0xff0000a0U

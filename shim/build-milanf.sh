@@ -49,7 +49,9 @@ fi
 # --- Build (mirrors build.sh) ---------------------------------------------
 CC=aarch64-linux-gnu-gcc
 OBJCOPY=aarch64-linux-gnu-objcopy
-CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
+# -DMILANF selects the board branch in console.h (FB geometry) and mmu.h
+# (FB_PHYS); without it those files fall back to sweet's SM7150 constants.
+CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra -DMILANF=1"
 mkdir -p out
 for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c; do
 	$CC $CFLAGS -c $f -o out/${f%.*}.o
@@ -71,5 +73,5 @@ mkbootimg --header_version 2 --kernel out/Image --ramdisk out/ramdisk.bin \
 	--tags_offset "$TAGS_OFFSET" --dtb_offset "$DTB_OFFSET" --pagesize "$PAGESIZE" \
 	--os_version 17.0.0 --os_patch_level 2035-06 \
 	--cmdline "console=null" -o out/shim-boot-milanf.img
-gcc -O1 -Wall -o out/host_test console.c host_test.c && ./out/host_test
+gcc -O1 -Wall -DMILANF=1 -o out/host_test console.c host_test.c && ./out/host_test
 ls -l out/Image out/shim-boot-milanf.img

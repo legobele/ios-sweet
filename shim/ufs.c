@@ -13,7 +13,12 @@
 #include "console.h"
 #include "ufs.h"
 
+#if defined(MILANF)
+#include "milanf-config.h"
+#define UFS_BASE	MILANF_UFS_BASE	/* ufshc@4804000 ufs_mem, unit DTB */
+#else
 #define UFS_BASE	0x01d84000UL	/* ufshc@1d84000, sweet live FDT */
+#endif
 
 #define REG_CAP		0x00
 #define REG_VER		0x08
