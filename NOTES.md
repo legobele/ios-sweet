@@ -2073,3 +2073,61 @@ __TEXT_EXEC, 10 segments, kernel_end consistent).
 
 This image was NOT booted, flashed, or written to the device in any way.
 Booting is Giulia's in-person call.
+
+## Loader payload-scan fix (2026-10-25 night, Lux direct, rebuilt image NOT BOOTED)
+
+Boot observations (Giulia in person, Lux driving fastboot over SSH;
+two temp boots of the payload image from the section above, identical
+behavior): ABL accepted the image ("Booting OKAY"), the shim ran, and
+the shim painted "INITRD lo=A43CE000 hi=A56FED14" followed by the
+no-payload branch: "UFS probe done, reset in ~3 min" (shim.c), then a
+reset back to the installed LineageOS. So /chosen does carry initrd
+props, but the range they describe is 0xA56FED14 - 0xA43CE000 =
+20,122,900 bytes, while the payload is 16,378,992 bytes: 3,743,908
+bytes larger. The loader's magic check at rd_start failed ("no
+SWEETXNU payload") even though the range is bigger than the payload,
+not smaller.
+
+File-level proof the image itself is correct: the ramdisk section of
+shim/out/shim-boot-milanf.img (16,378,992 bytes at file offset
+0x2d000) begins with the SWEETXNU magic and its sha256
+f5775bb8e90b7a0dbffc5fadd42bfb1989b8191cfe98fdf3139153e74b3e7904 is
+byte-identical to out/payload.bin. Conclusion: ABL is delivering or
+pointing at something offset from our payload inside that RAM range.
+The exact ABL quirk is unknown and was not chased; the fix below
+stops trusting rd_start blindly.
+
+Patch (shim/loader.c only, committed with this note):
+- header_ok() factors out the existing header sanity (version == 1,
+  adt_off 8-aligned, base 8-aligned) so both paths apply it verbatim.
+- When the magic check at rd_start fails, the shim first paints an
+  "RDHDR w0=<hex> w1=<hex>" line: the first 8 bytes actually sitting
+  at rd_start, so the next boot screen shows what ABL put there.
+- find_payload() then scans the initrd range for the SWEETXNU magic,
+  4096-byte steps first (payloads are built page-aligned), then
+  8-byte steps. A candidate must pass the same header_ok() sanity;
+  the first one that does becomes the payload base, and the shim
+  paints "PAYLOAD <offset>" with the offset relative to rd_start.
+  Segment and ADT copies are now relative to that base. The overlap
+  check still runs on the full rd_start..rd_end range, unchanged.
+- No check was weakened: if no candidate passes, the loader returns
+  the same "no SWEETXNU payload" as before, and when the payload sits
+  at rd_start the behavior is byte-for-byte the old path.
+
+Rebuild (payload and ADT untouched): build-milanf.sh against the same
+reference boot image recompiled the shim and re-wrapped the same
+payload. Verified with tools/bootinfo.py: header v3, header_size
+1580, os 16.0.0 / patch 2026-08, "image end ok"; the ramdisk section
+extracted from the new image still hashes to f5775bb8... (payload
+bytes unchanged), and the kernel section matches the new shim Image,
+which contains the RDHDR/PAYLOAD strings.
+- shim/out/shim-boot-milanf.img: 16,564,224 bytes (same total as
+  before; the loader growth fit inside the shim's existing 180,224
+  byte footprint)
+- sha256: e8f21afddc817235819dc9e7942cdb1c77a96d1582cea4a9b9fa030708361465
+
+This rebuilt image was NOT booted, flashed, or written to the device
+in any way. Next boot's screen is the test: RDHDR shows what ABL
+placed at rd_start, PAYLOAD shows the offset the scan found, or the
+same no-payload failure returns if the payload is not in the range
+at all. Booting is Giulia's in-person call.

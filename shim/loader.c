@@ -74,6 +74,41 @@ static int magic_ok(const char *m)
 	return 1;
 }
 
+/* The header sanity loader_boot applies, factored out for the scan below. */
+static int header_ok(const struct payload *p, uint64_t base)
+{
+	return p->version == 1 && !(p->adt_off & 7) && !(base & 7);
+}
+
+static uint64_t scan_step(uint64_t rd_start, uint64_t rd_end, uint64_t step)
+{
+	for (uint64_t at = rd_start; at + 8 <= rd_end; at += step) {
+		const struct payload *cand = (const struct payload *)at;
+
+		if (magic_ok(cand->magic) && header_ok(cand, at))
+			return at;
+	}
+	return 0;
+}
+
+/*
+ * ABL does not always deliver the ramdisk contents starting exactly at
+ * linux,initrd-start (milanf: the /chosen range is larger than the
+ * image's ramdisk section and the payload sits at an unknown offset in
+ * it), so when the magic is not at rd_start, scan the whole range for a
+ * payload whose header passes the same sanity checks as the direct
+ * path. Coarse 4K steps first (payloads are built page-aligned), then
+ * 8-byte steps.
+ */
+static uint64_t find_payload(uint64_t rd_start, uint64_t rd_end)
+{
+	uint64_t at = scan_step(rd_start, rd_end, 4096);
+
+	if (!at)
+		at = scan_step(rd_start, rd_end, 8);
+	return at;
+}
+
 typedef void (*xnu_entry_t)(uint64_t boot_args_pa);
 
 const char *loader_boot(uintptr_t dtb)
@@ -85,10 +120,19 @@ const char *loader_boot(uintptr_t dtb)
 		return "no initrd in /chosen";
 	con_hex2("INITRD", "lo=", rd_start, "hi=", rd_end);
 
-	const struct payload *p = (const struct payload *)rd_start;
-	if (!magic_ok(p->magic))
-		return "no SWEETXNU payload";
-	if (p->version != 1 || (p->adt_off & 7) || (rd_start & 7))
+	uint64_t base = rd_start;
+	const struct payload *p = (const struct payload *)base;
+	if (!magic_ok(p->magic)) {
+		const volatile uint32_t *w = (const volatile uint32_t *)rd_start;
+
+		con_hex2("RDHDR", "w0=", w[0], "w1=", w[1]);
+		base = find_payload(rd_start, rd_end);
+		if (!base)
+			return "no SWEETXNU payload";
+		con_hex("PAYLOAD", base - rd_start);
+		p = (const struct payload *)base;
+	}
+	if (!header_ok(p, base))
 		return "bad payload header";
 
 	uint64_t pa_of_va_base = p->phys_base - p->virt_base;	/* pa = va + this */
@@ -103,7 +147,7 @@ const char *loader_boot(uintptr_t dtb)
 	for (uint32_t i = 0; i < p->nsegs; i++) {
 		const struct payload_seg *s = &p->segs[i];
 		uintptr_t dst = s->vmaddr + pa_of_va_base;
-		copy64(dst, rd_start + s->file_off, s->file_size);
+		copy64(dst, base + s->file_off, s->file_size);
 		if (s->vmsize > s->file_size)
 			zero64(dst + ((s->file_size + 7) & ~7UL), s->vmsize - ((s->file_size + 7) & ~7UL));
 	}
@@ -111,7 +155,7 @@ const char *loader_boot(uintptr_t dtb)
 
 	/* ADT, then boot_args, behind the kernel; everything below topOfKernelData is ours. */
 	uintptr_t adt_pa = p->kernel_end + pa_of_va_base;
-	copy64(adt_pa, rd_start + p->adt_off, p->adt_size);
+	copy64(adt_pa, base + p->adt_off, p->adt_size);
 	uintptr_t ba_pa = (adt_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
 	uintptr_t top = ba_pa + PAGE_16K;
 
