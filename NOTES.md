@@ -2131,3 +2131,50 @@ in any way. Next boot's screen is the test: RDHDR shows what ABL
 placed at rd_start, PAYLOAD shows the offset the scan found, or the
 same no-payload failure returns if the payload is not in the range
 at all. Booting is Giulia's in-person call.
+
+## 2026-10-25 overnight (autonomous, Lux subagent): scan alignment fix
+
+Desk finding that pins the payload offset exactly. The /chosen range
+ABL reported on the two observed boots was 20,122,900 bytes; the
+payload is 16,378,992 bytes; the difference is 3,743,908 bytes, which
+is byte-for-byte the vendor_ramdisk_size in the header of the dumped
+vendor_boot.img (Downloads, VNDRBOOT v3). ABL concatenates
+[vendor ramdisk][boot ramdisk] and reports the combined range, so the
+payload sits at rd_start + 3,743,908, flush at rd_end. That offset is
+4 mod 8 (3,743,908 = 4 x 935,977), NOT 8-aligned.
+
+That breaks the scan from the previous section two ways:
+- scan steps of 4096 and 8 from an 8-aligned rd_start never land on
+  +3,743,908, so the magic is stepped over;
+- header_ok() requires !(base & 7), so even a found candidate at the
+  true offset would be rejected. Worse, probe-by-dereference of the
+  u64 header fields at a 4-mod-8 base would fault: with the MMU off,
+  RAM reads are Device memory and unaligned accesses fault.
+
+Fix (shim/loader.c, this commit):
+- probe_payload(): byte-copies the header into an aligned static
+  buffer (read_dev) and validates the copy (version 1, 1..64 segs,
+  header and ADT inside the range, adt_off 8-aligned). No in-place
+  dereference of a scanned candidate.
+- find_payload(): steps 4096, 8, 4, then 1. The 4-byte step is the
+  one that can land on the concatenation offset.
+- copy_auto()/zero_auto(): alignment-aware copies for segment and
+  ADT data whose source (base + file_off) is only 4-aligned; the
+  32-bit path covers the real case, byte path is the fallback. The
+  direct path (payload at rd_start, 8-aligned) is unchanged, and no
+  check was weakened: a scanned payload must pass the same version /
+  adt_off / bounds sanity, and the overlap check is unchanged.
+
+Rebuilt via build-milanf.sh with the same reference image; payload
+and ADT untouched (ramdisk section still 16,378,992 bytes, "SWEE"
+format per bootinfo; payload bytes unchanged).
+- shim/out/shim-boot-milanf.img: 16,568,320 bytes
+- sha256: d9b53ac5b03769bcc187dd4a161e68b8b046b430412a9e4c538e00224545ac7f
+
+Not booted yet at the time of this entry; the overnight boot loop
+that follows is logged in the morning digest
+(goals/ios-setup-assistant-port-for-milanf/hidden_files/overnight-2026-10-25-digest.md).
+Prediction for the next boot screen: RDHDR w0/w1 = the vendor
+ramdisk's first bytes (lz4 frame magic expected, stock ramdisks here
+are lz4), PAYLOAD 3923b4 (= 3,743,908). If PAYLOAD never paints, the
+concatenation model is wrong despite the arithmetic.
