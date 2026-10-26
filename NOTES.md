@@ -2178,3 +2178,52 @@ Prediction for the next boot screen: RDHDR w0/w1 = the vendor
 ramdisk's first bytes (lz4 frame magic expected, stock ramdisks here
 are lz4), PAYLOAD 3923b4 (= 3,743,908). If PAYLOAD never paints, the
 concatenation model is wrong despite the arithmetic.
+
+## 2026-10-25 overnight (autonomous): iteration 1 - payload TAKEN, device held
+
+Boot loop iteration 1, run against the image from the previous entry
+(16,568,320 bytes, sha256 d9b53ac5..., loader fix 7e70615). Full log:
+overnight-logs/iter1.log; extended watch: overnight-logs/watch3.log.
+
+- 21:17:57 AST runner start (phone in LineageOS on adb).
+- 21:18:10 adb reboot bootloader; fastboot sees ZY22GKSFCV.
+- 21:18:21 fastboot boot: Sending 'boot.img' (16180 KB) OKAY,
+  Booting OKAY, total 10.816s.
+- 36 polls x 20s (21:18:41-21:30:31): adb, fastboot, USB-ECM
+  (02:00:5e:77:ee:01) and new-USB-device checks ALL negative, every
+  poll. Runner closed with "adbBack=-1 ecmSeen=False".
+- Extended watch (watch3, 25 x 60s, 21:32:03-~21:57): identical.
+  The phone never re-enumerated in any form.
+
+Why this means the payload was taken: on both pre-fix payload boots
+the loader failure path ran the UFS probe and PSCI-reset at ~180s,
+and LineageOS was back on adb roughly 60-90s after that. This boot
+blew through that window and stayed dark for 37+ minutes of
+observation. The only code path that skips the timed reset is
+loader_boot succeeding: scan found SWEETXNU (predicted offset
++0x3923b4, behind the vendor ramdisk), header probe passed, segments
+copied, jump taken. The watchdog cannot rescue a wedged kernel here:
+the payload cmdline carries wdt=-1.
+
+What is NOT known: where it stopped after the jump. No ECM/USB
+enumeration ever appeared, so there is no positive userspace (or
+even late-kernel) sign. Remaining cases, in BRINGUP section 4 triage
+order: shim exception at copy/jump (blue screen), XNU dead before
+fbcon (shim's painted lines still up, incl. PAYLOAD/JUMP), XNU hung
+in early boot (fbcon text on screen; hang after "kdp_core zlib
+memory" = panic-log carve), XNU alive but USB stack never came up.
+All four are discriminated by ONE look at the phone's screen; the
+log ring (patch 0047) would confirm, but no OrangeFox recovery image
+exists on this machine, so the ring pull stays parked.
+
+Iterations 2-5 of the overnight budget were deliberately NOT
+spent: the phone never returned to fastboot (nothing to boot), and
+with no evidence about where the kernel stopped, changing any
+variable would be guessing. The payload question this run set out
+to answer is answered.
+
+State left: phone held by shim/kernel since 21:18:21, USB-dark;
+temp boot is one-shot, so a power-cycle or a flat battery returns
+it to LineageOS - it cannot be bricked by this. Disk image is the
+7e70615 build. Nothing pushed. Next step (needs eyes): photograph
+the phone screen BEFORE pressing anything.
