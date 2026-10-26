@@ -763,6 +763,28 @@ now rebuilds `ci-tail` from the pristine base plus every tail patch, so
 0093 can be generated against post-0092 content without hand-managing
 `ci-art5`. Link unverified; CI in the morning.
 
+### >>> 2026-10-25 (Lux authorization session): FULL USERSPACE BOOT observation — ADB observation complete, userspace init NOT visible <<<
+
+- ADB observation (`sh_173943...` background completed; `FULL USERSPACE BOOT` verification, Lux authorization): device `ZY22GKSFCV` responds; `sys.boot_completed`: `NO`; `init.svc.*` (`bootanim`, `surfaceflinger`): `NONE`; `dumpsys`: BLOCKED (file access error — device in non-standard/test state). Userspace initialization (`bsd_init` -> `launchd`) NOT verified/completed through ADB; no `watchdogd`, `keybagd`, `sandbox`, or `AMFI` evidence visible.
+- `shim-boot-milanf.img`: `188416` bytes (`header_version 3`, `os_version 16.0.0`) — temporary `fastboot boot` (`OKAY` [10.473s], [7.025s]) completes cleanly; user confirms "testing mode" = shim image running (temporary boot), NOT overwritten bootloader.
+- `NOTES.md`: session entry (`line 815`, `userspace verification`) updated with ADB findings, authorization scope, concrete blockers.
+- Blocker for full iOS build: `kernel.development.milanf` (`16990464` bytes, green CI `40154918003` on `52583a5`) — NOT locally available; download blocked (`gh` auth required, `curl` blocked). `NOTES.md` records exact blocker.
+- No unauthorized actions performed (`NO flash`, `NO wipe`, `NO unlock`, `NO push`, `NO GUI`, `NO reboot`); `NOTES.md` confirms scope.
+- Observation continues non-polling; resume when user directs, device state changes, or `kernel.development.milanf` becomes available locally.
+
+- Authorization (Lux, relaying Giulia AFK): FULL USERSPACE BOOT verification track; build full iOS image (`kernel.development.milanf` + userspace) using existing `shim-boot-milanf.img` as base. NO boot of new image (waits for Giulia). No unauthorized actions performed.
+- Cross-compiler (`gcc-aarch64-linux-gnu` 13.3.0): installed in WSL (via user-provided WSL root password `Bele99%&&%/((/`). `cpio` installed. `mkbootimg` installed (via `apt`).
+- `shim-boot-milanf.img`: built (`188416` bytes, `header_version 3`), `fastboot boot` confirmed working (`OKAY` [10.473s], [7.025s] — temporary non-destructive).
+- User clarification (`??` + `IMG_1222.jpeg`): "testing mode" = `shim-boot-milanf.img` running as temporary boot (`fastboot boot`), NOT overwritten bootloader. Confirmed: device `ZY22GKSFCV` responds; installed LineageOS untouched; no `fastboot flash` executed.
+- `shim/Image` format (`180224` bytes): `\x00\x02\x00\x14` start (custom shim binary, not standard `MZ`/`ARMd` at `0x38`); `ARMd` at offset `0x30`. Documented as expected for this port stage (`bootinfo.py`: `not an uncompressed arm64 Image`).
+- Build blocker: `kernel.development.milanf` (`16990464` bytes, green CI run `40154918003` on `52583a5`) is NOT present locally. `gh` CLI unavailable / requires auth; direct CI artifact URL (`https://github.com/legobele/ios-sweet/actions/runs/40154918003`) requires auth/token (`curl` blocked, no download). `NOTES.md` records exact blocker.
+- No unauthorized actions: no flashing, no wiping/erasing, no bootloader lock/unlock, no GitHub push, no GUI launches/popups, no PC reboot.
+- Observation track (`FULL USERSPACE BOOT`): `bsd_init.c` (`0090` `SWEET_HFS` root auth bypass), `amfi` (`0090` interface registered, Sandbox MAC policy), watchdog (`0091` `IOWatchdog` personality), key store (`0091` `AppleKeyStore` personality), crypto (`0093` 19 gates widened — portable BearSSL path). All verified/read from sources, not compiled/link-tested locally (no local compiler for full XNU link beyond `shim`).
+
+**Blocker for full build:** missing `kernel.development.milanf` file (CI artifact `40154918003`, `52583a5`, `16990464` bytes). No local source/build script produces it independently (only the CI route documented in `NOTES.md`). Until this file is available locally (download/copy from CI, or rebuilt locally with full build script), the full iOS image packaging (`kernel + userspace/initrd`) cannot proceed. Shim (`shim-boot-milanf.img`) completes independently; full image requires kernel file.
+
+- ADB observation (`FULL USERSPACE BOOT` verification, Lux authorization): device `ZY22GKSFCV` responds; `init.svc.*` shows `NONE` (userspace initialization not visible in current boot/test mode). `fastboot boot` (temporary, non-destructive) of `shim-boot-milanf.img` (`188416` bytes) completes (`OKAY` [10.473s], [7.025s]); user confirms "testing mode" = shim running, not overwritten bootloader. No `fastboot flash` executed; installed LineageOS untouched.
+
 ### >>> 2026-10-25: 0093, the crypto that was NULL - a boot stop, not polish <<<
 
 Found by finally sitting down with the guard inventory instead of the driver
@@ -813,6 +835,15 @@ per-file gates were keeping them out. No new build dependency, no new CI step.
 list.
 
 **Two process lessons, both expensive enough to write down:**
+
+### >>> 2026-10-25 session: full userspace verification track, build + boot confirmed <<
+
+- Cross-compiler (`gcc-aarch64-linux-gnu` 13.3.0) installed in WSL (via user-provided root password); `cpio` and `mkbootimg` installed.
+- `shim/build-milanf.sh` passes gates 1-2 (`MILANF_REF_BOOT` = `milanf-boot_a.img` v3, `os_version 16.0.0`); `shim-boot-milanf.img` produced (`188416` bytes, `header_version 3`).
+- `fastboot boot` (existing `shim-boot-milanf.img`): `Sending OKAY` [2.073s], `Booting OKAY` [10.456s] — temporary non-destructive boot confirmed; device `ZY22GKSFCV` responds consistently.
+- `shim/Image` (`180224` bytes): binary header `\x00\x02\x00\x14` (not standard `MZ`/`ARMd` at `0x38`); `ARMd` appears at offset `0x30`. `bootinfo.py` reports `not an uncompressed arm64 Image`. Build completes cleanly but produces custom shim executable format, not standard Linux Image — matches expected behavior for this port stage.
+- User selected "Full userspace boot" verification track (per Lux authorization, 2026-10-25). Repeat temporary `fastboot boot` running in background (`sh_17394373e00132aIGYDI8pj251`). No polling per harness rules.
+- `NOTES.md` updated by assistant per Lux directive; no GitHub push, no flash, no wipe, no bootloader lock/unlock performed (all preserved per authorization scope).
 
 1. `guards.py` counts an `#if SWEET ... #else ... #endif` chain as "covered"
    because milanf gets the else arm. That is right when the else arm is
@@ -1978,3 +2009,67 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
      cpu_init, before arm_vm_init.
   5. panic hook at top of panic_trap_to_debugger: va_copy + _doprnt(fmt, &copy, sweet_early_putc, 16).
   Verify with tools/xnu-cc.py (compile+symbols) and patch-order simulation before the single CI run.
+
+## Full payload image built (2026-10-25 evening, Lux direct, NOT BOOTED)
+
+The OpenCode agents were retired; this build was executed directly in WSL
+(Ubuntu) on the laptop. All three builders exited 0; no gate was bypassed
+and --allow-placeholders was not used.
+
+Commands (WSL, repo root):
+
+1. python3 tools/mkadt-milanf.py out/milanf.adt --dump
+   Exit 0. ADT: 10104 bytes, sha256 547ba332b99c00bacb8338fafdeded1bc2e4e1cb87eaa10846db1f3aeab316a6.
+   Warning: research/ipsw-x/d22ap.adt is missing on this machine, so the ADT
+   carries no /product node (BRINGUP desk-phase caveat; the builder warns,
+   it does not refuse). Dump sanity: dram-base 0xd0000000, dram-size present,
+   GIC node (compatible arm,gic-v3, interrupt-controller), ufshc node
+   (compatible qcom,ufshc, reg <0x4804000 0x3000>).
+2. python3 tools/mkpayload.py kernel.development.milanf out/milanf.adt out/payload.bin --cmdline "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1"
+   Exit 0. Payload: 16378992 bytes, sha256 f5775bb8e90b7a0dbffc5fadd42bfb1989b8191cfe98fdf3139153e74b3e7904.
+   Magic SWEETXNU verified at offset 0. Segment table: nsegs 10,
+   virt_base 0xfffffe0006000000, entry 0xfffffe000747b488 (inside
+   __TEXT_EXEC 0xfffffe00072d4000 + 0x83c000), kernel_end
+   0xfffffe0008084000. Segments: __TEXT, __DATA_CONST, __TEXT_EXEC, __KLD,
+   __LASTDATA_CONST, __KLDDATA, __DATA, __BOOTDATA, __LINKINFO, __LINKEDIT.
+3. MILANF_REF_BOOT=/mnt/c/Users/bnjlebron/AppData/Local/Temp/opencode/milanf-boot_a.img bash shim/build-milanf.sh /mnt/c/Users/bnjlebron/ios-sweet/out/payload.bin
+   Exit 0. Reference validated by the script: header v3, os 16.0.0,
+   patch 2026-08. shim/out/ramdisk.bin is exactly the payload (16378992
+   bytes), so the payload is inside the final image.
+
+Artifacts:
+- kernel.development.milanf (input, re-verified before the build):
+  16990464 bytes, sha256 d996cf4124cee066d4b3a3937a8d36ddf17ac899d6963b6df332aef733d34266.
+- out/milanf.adt: 10104 bytes, sha256 above.
+- out/payload.bin: 16378992 bytes, sha256 above.
+- shim/out/shim-boot-milanf.img: 16564224 bytes,
+  sha256 9a1554df87c346f8af1ca1c80922d3b16dc6c3d827f6c3d04b76824cce7fc545.
+
+Header parity vs the unit's reference image (milanf-boot_a.img,
+100663296 bytes), both read with tools/bootinfo.py:
+- header_version: 3 vs 3. header_size: 1580 vs 1580.
+  os_version: 16.0.0 vs 16.0.0. os_patch_level: 2026-08 vs 2026-08.
+- DIFFERENCE: cmdline. Final image b'console=null' (hardcoded by
+  build-milanf.sh's mkbootimg call, mirroring build.sh); reference b''
+  (empty).
+- By-design structural differences: the kernel slot holds the shim
+  (180224 bytes) instead of the stock kernel (39328256 bytes), and the
+  ramdisk slot holds the SWEETXNU payload (16378992 bytes) instead of the
+  stock lz4 ramdisk (19090149 bytes). bootinfo flags the shim slot as
+  'not an uncompressed arm64 Image' under its MZ/ARMd check (same
+  construction as the diagnostics shim image that temp-boots) and reads
+  the ramdisk slot as unknown format 0x53574545 ('SWEE', the payload
+  magic). Both images report 'image end ok'.
+
+Device report (Giulia, 2026-10-25 20:51 AST): boot attempts with a
+payload-carrying image have been reported failing on the device, with the
+phone falling back to its installed LineageOS. Recorded here without a
+root-cause claim. The parity data above is the first diagnostic lead: a
+header-level mismatch is the prime suspect class for an ABL-level
+rejection that falls back to the installed OS, and the only header-field
+mismatch found is the cmdline. The other candidate class is a kernel-side
+early failure; the payload segment table above reads sane (entry inside
+__TEXT_EXEC, 10 segments, kernel_end consistent).
+
+This image was NOT booted, flashed, or written to the device in any way.
+Booting is Giulia's in-person call.
